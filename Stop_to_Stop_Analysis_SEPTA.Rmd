@@ -1,0 +1,2287 @@
+---
+title: "The Early Morning Rush: A Suburban Commuter's Challenge"
+author: "Regy Septian"
+date: "2024-09-24"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: "hide"
+    code_download: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
+
+library(tidyverse)
+library(sf)
+library(tidytransit)
+library(lubridate)
+library(hms)
+library(tidyr)
+library(patchwork)
+library(kableExtra)
+library(wk)
+library(leaflet)
+library(leaflet.extras)
+library(viridis)
+library(viridisLite)
+library(htmlwidgets)
+library(htmltools)
+library(leaflet.extras)
+library(forcats)
+library(ggplot2)
+library(scales)
+library(shiny)
+library(webshot2)
+library(magick)
+
+# Define the color codes
+bus_revolution_colors <- c("#A6123A", "#655BA6", "#26A699", "#F2AE2E", "#F2E5D5")
+
+# Create a custom palette function
+bus_revolution_palette <- function(n) {
+  colorRampPalette(bus_revolution_colors)(n)
+}
+
+workdir <- "C:/Users/rseptian/OneDrive - SEPTA/01_PROJECT/01_Transit_Priority/Stop_to_Stop_Analysis" # Change the directory
+setwd(workdir)
+```
+
+## 1 Introduction
+
+Every morning, Midge, a recent graduate working in downtown Philadelphia, starts her day battling the limitations of suburban bus transit. With services far less frequent than those in urban centers, her story illustrates the broader struggles faced by many suburban commuters, dependent on a system that doesn't meet their needs.
+
+Using the latest SEPTA General Transit Feed Specification (GTFS) data[^1], it reveals that a staggering 80% of SEPTA's trips are made by bus, showcasing the critical role of bus transit in Philadelphia’s transportation network. This statistic underlines the heavy reliance on buses across the city, not just in suburban areas. 
+
+[^1]: [SEPTA GTFS](https://www3.septa.org/developer/gtfs_public.zip)
+
+```{r import gtfs, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+# Import GTFS data
+stops <- read.csv("stops.txt", header = TRUE, sep = ",")
+stop_times <- read.csv("stop_times.txt", header = TRUE, sep = ",")
+trips <- read.csv("trips.txt", header = TRUE, sep = ",")
+shapes <- read.csv("shapes.txt", header = TRUE, sep = ",")
+routes <- read.csv("routes.txt", header = TRUE, sep = ",")
+calendar <- read.csv("calendar.txt", header = TRUE, sep = ",")
+calendar_dates <- read.csv("calendar_dates.txt", header = TRUE, sep = ",")
+
+```
+
+
+```{r import swiftly, message=FALSE, warning=FALSE, cache=TRUE, results='hide'}
+# Import Swiftly data
+swiftly <- st_read("SwiftlyShapes/geoJSONs/SEPTASurface_HighResSpeed_v2.json")
+
+```
+
+### 1.2 Exploratory Data Analysis
+
+#### 1.2.1 Total Trip by Mode
+
+The chart below illustrates the total number of trips recorded by each mode of transportation. With over 2 million observations, 88% of the trips were made by bus, with the remaining trips taken by trolley, trolley bus, and metro. It's important to note that these trip counts differ from ridership numbers, which are based on the number of passengers. Here, trips are counted by the number of stops each mode makes; hence, a single trip can account for multiple passengers depending on the vehicle's capacity and utilization.
+
+This study focuses primarily on bus trips, which constitute the majority of the observations. For this analysis, trolley buses are also categorized under bus trips, which collectively account for over 90% of the trips. The subsequent sections will therefore focus on the bus trips.  
+
+```{r total trip, message=FALSE, warning=FALSE, cache=TRUE}
+# Join stop_times and trips, from now on dat will be our main data set
+dat <- left_join(stop_times, trips, by = "trip_id")
+
+# join dat and routes
+dat <- left_join(dat, routes, by = "route_id")
+
+#determine route_type
+dat <- dat %>%
+  mutate(mode = if_else(route_type == 0, "Trolley", ifelse(route_type == 1, "Metro", ifelse(route_type == 3, "Bus", "Trolleybus"))))
+
+# Mode share (not ridership)
+dat_trip_by_mode <- dat %>%
+  group_by(mode) %>%
+  summarise(mode_count = n(), .groups = 'drop') %>%
+  mutate(total_count = sum(mode_count),
+         mode_share = round(mode_count/sum(mode_count)*100, digits = 2)) %>%
+  ungroup() 
+  
+# Plot mode share using ggplot2 and the custom palette
+ggplot(dat_trip_by_mode, aes(x = mode, y = mode_share, fill = mode)) +
+  geom_bar(stat = "identity", width = 0.75) +
+  scale_fill_manual(values = bus_revolution_palette(length(unique(dat_trip_by_mode$mode)))) +
+  geom_text(aes(label = paste0(mode_share, "% (", mode_count, " trips)")), 
+            vjust = -0.5, color = "black", size = 2.5) +
+  labs(title = "Mode Share by Transit Type",
+       x = "Mode",
+       y = "Mode Share (%)",
+       fill = "Mode") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5))
+
+# total trip bus & trolley bus 1.980.505, total observations 2.026.677
+```
+
+#### 1.2.2 Service Period
+
+In this step, we define our service periods as: 
+  
+* Owl = 0:00:00 (midnight) to 3:59:59  
+* Early Morning = 4:00:00 to 5:59:59  
+* AM Peak = 6:00:00 to 8:59:59  
+* Mid Day = 9:00:00 to 14:59:59  
+* PM Peak = 15:00:00 to 17:59:59  
+* Evening = 18:00:00 to 21:59:59  
+* Late Night = 22:00:00 to 23:59:59 
+  
+```{r peak time, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+# CREATE LINE GRAPH OF TRIPS BY SERVICE PERIODS
+
+# Function to normalize times greater than 24:00:00. Important step: check the stop_times$arrival_time and departure_time values if it's greater than 24:00 
+normalize_time <- function(time_str) {
+  time_parts <- strsplit(time_str, ":")[[1]]
+  hours <- as.numeric(time_parts[1])
+  minutes <- as.numeric(time_parts[2])
+  seconds <- as.numeric(time_parts[3])
+  
+  if (hours >= 24) {
+    hours <- hours - 24
+    time_str <- sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+  }
+  
+  return(time_str)
+}
+
+#identify peak_pm category 
+dat <- dat %>%
+  mutate(departure_time = sapply(departure_time, normalize_time), # departure_time's normalized
+         departure_time = lubridate::hms(departure_time),
+         hour = hour(departure_time),  # Extract hour component for easier condition checking
+         peak_category = if_else(hour >= 4 & hour < 6, "Early Morning",
+                                    if_else(hour >= 6 & hour < 9, "AM Peak",
+                                            if_else(hour >= 9 & hour < 15, "Mid Day",
+                                                    if_else(hour >= 15 & hour < 18, "PM Peak",
+                                                            if_else(hour >= 18 & hour < 22, "Evening", 
+                                                                    ifelse(hour >= 22 & hour < 24, "Late Night", "Owl"))))))) 
+
+# # Check if there are any NA values in the 'departure_time' column
+# summarise(dat,
+#     na_count = sum(is.na(departure_time)), #Count NA values
+#     total_rows = n(),  # Total number of rows for context
+#     percentage_na = na_count / total_rows * 100  # Percentage of NA values
+#   )
+
+durations <- c("Owl" = 4, "Early Morning" = 2, "AM Peak" = 3, "Mid Day" = 6, "PM Peak" = 3, "Evening" = 4, "Late Night" = 2)
+
+dat_service_period <- dat %>%
+  filter(mode %in% c("Bus", "Trolleybus", "Trolley")) %>%
+  group_by(peak_category)%>%
+  summarise(peak_count = n(), .groups = 'drop') %>%
+  mutate(total_count = sum(peak_count),
+         peak_share = round(peak_count/sum(peak_count)*100, digits = 2)) %>%
+  arrange(factor(peak_category, levels = c("Owl", "Early Morning", "AM Peak", "Mid Day", "PM Peak", "Evening", "Late Night"))) %>%
+  ungroup()
+
+# Create a data frame for service periods
+service_periods <- data.frame(
+  peak_category = c("Owl", "Early Morning", "AM Peak", "Mid Day", "PM Peak", "Evening", "Late Night"),
+  start_hour = c(0, 4, 6, 9, 15, 18, 22),
+  end_hour = c(4, 6, 9, 15, 18, 22, 24)
+)
+
+```
+
+#### 1.2.3 Weekday/Weekend Service
+
+Next, we identified whether the bus is weekday or weekend service.
+  
+```{r calendar, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+# CREATE BAR CHART OF TRIPS BY SERVICE TYPES
+
+# Ensure 'calendar' has 'day_type' defined
+calendar <- calendar %>%
+  mutate(
+    day_type = case_when(
+      monday == 1 & tuesday == 1 & wednesday == 1 & thursday == 1 & friday == 1 & saturday == 0 & sunday == 0 ~ "Weekday",
+      (saturday == 1 | sunday == 1) ~ "Weekend",
+      TRUE ~ "irregular"
+    )
+  )
+
+# Calendar_dates includes 'service_id', 'date', and 'exception_type'
+# Ensure 'calendar_dates' has 'day_type' defined based on the date
+calendar_dates <- calendar_dates %>%
+  filter(exception_type == 1) %>% #we only need exception_type == 1, those added to the service
+  mutate(
+    date = ymd(date),  # Convert date format if necessary
+    day_of_week = wday(date, label = TRUE, week_start = 1),
+    day_type = case_when(
+      day_of_week %in% c("Mon", "Tue", "Wed", "Thu", "Fri") ~ "Weekday",  # Monday to Friday
+      TRUE ~ "Weekend"  # Saturday and Sunday
+    )
+  )
+
+# Join calendar_dates with calendar
+calendar_joined <- calendar_dates %>%
+  full_join(calendar, by = "service_id", suffix = c(".dates", ".cal")) %>%
+  mutate(
+    final_day_type = case_when(
+      # Use calendar_dates' day_type if exception_type indicates added service
+      exception_type == 1 & day_type.dates == "Weekday" ~ "Weekday",
+      exception_type == 1 & day_type.dates == "Weekend" ~ "Weekend",
+      # Default to calendar's day_type where there's no specific exception noted
+      TRUE ~ day_type.cal
+    )
+  ) %>%
+  select(service_id, final_day_type) %>%
+  group_by(service_id, final_day_type) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(service_id, desc(count)) %>%
+  distinct(service_id, .keep_all = TRUE) %>% # Make sure no double day types for service ID
+  select(-count)
+  
+dat <- dat %>%
+  left_join(calendar_joined, by = "service_id")
+
+dat_service_type <- dat %>%
+  filter(mode %in% c("Bus", "Trolleybus", "Trolley")) %>%
+  group_by(final_day_type)%>%
+  summarise(day_type_count = n(), .groups = 'drop') %>%
+  mutate(total_count = sum(day_type_count),
+         peak_share = round(day_type_count/sum(day_type_count)*100, digits = 2)) %>%
+  arrange(factor(final_day_type, levels = c("Weekday", "Weekend"))) %>%
+  ungroup()
+
+# # Plot trip share using ggplot2 and the custom palette
+# ggplot(dat_service_type, aes(x = factor(final_day_type, levels = c("Weekday", "Weekend")), y = day_type_count, fill = final_day_type)) +
+#   geom_bar(stat = "identity", width = 0.5) +
+#   scale_fill_manual(values = bus_revolution_palette(length(unique(dat_service_type$final_day_type)))) +
+#   geom_text(aes(label = paste0(day_type_count, " trips")),
+#             vjust = -0.5, color = "black", size = 2.5) +  # Adjusted text size for better visibility
+#   labs(title = "Trip Share by Service Type",
+#        x = "Service Type",
+#        y = "Number of Trip",
+#        fill = "Service Type") +
+#   scale_y_continuous(labels = comma) +
+#   theme_minimal() +
+#   theme(legend.position = "none",
+#         plot.title = element_text(hjust = 0.5))
+
+# # Check if there are any NA values in the 'final_day_type' column
+# summarise(dat,
+#     na_count = sum(is.na(final_day_type)),  # Count NA values
+#     total_rows = n(),  # Total number of rows for context
+#     percentage_na = na_count / total_rows * 100  # Percentage of NA values
+#   )
+
+```
+
+In summary, the weekend and weekday services show different pattern: 
+
+```{r hourly trips plot, message=FALSE, warning=FALSE, cache=TRUE}
+# Summarize data to get the number of trips per hour
+hourly_trips <- dat %>%
+  filter(mode %in% c("Bus", "Trolleybus", "Trolley")) %>%
+  group_by(hour, final_day_type) %>%
+  summarise(number_of_trips = n())
+
+# Define a custom palette for the service periods
+service_period_colors <- c(
+  "Owl" = "#E5E5E5",
+  "Early Morning" = "#C5E0B4",
+  "AM Peak" = "#A9D08E",
+  "Mid Day" = "#FFD966",
+  "PM Peak" = "#F4B084",
+  "Evening" = "#D5A6BD",
+  "Late Night" = "#A4C2F4"
+)
+
+# Plot the combined graph
+ggplot() +
+  # Add service period background rectangles
+  geom_rect(data = service_periods, aes(xmin = start_hour, xmax = end_hour, ymin = 0, ymax = max(hourly_trips$number_of_trips), fill = peak_category), alpha = 0.3) +
+  # Add the line plot for weekday trips
+  geom_line(data = hourly_trips %>% filter(final_day_type == "Weekday"), aes(x = hour, y = number_of_trips), color = "#F2AE2E", size = 1) +
+  geom_point(data = hourly_trips %>% filter(final_day_type == "Weekday"), aes(x = hour, y = number_of_trips), color = "#26A699", size = 2) +
+  # Add the line plot for weekend trips
+  geom_line(data = hourly_trips %>% filter(final_day_type == "Weekend"), aes(x = hour, y = number_of_trips), color = "#A6123A", size = 1) +
+  geom_point(data = hourly_trips %>% filter(final_day_type == "Weekend"), aes(x = hour, y = number_of_trips), color = "#26A699", size = 2) +
+  # Define scales and labels
+  scale_x_continuous(breaks = 0:23) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_manual(values = service_period_colors) +
+  scale_color_manual(values = c("Weekday" = "#F2AE2E", 
+                                "Weekend" = "#A6123A")) +
+  labs(title = "Number of Trips by Hour with Service Periods",
+       x = "Hour of Day",
+       y = "Number of Trips",
+       fill = "Service Period",
+       color = "Day Type") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5))
+  
+```
+
+
+#### 1.2.4 Bus Stops & Street Segments
+
+```{r set up stops category, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+# SET UP STOPS CATEGORY. This step is crucial as we'll use stops information and join them for each kind of maps 
+
+# Convert stops data to sf object
+stops <- stops %>%
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326, remove = FALSE)
+
+# Load PA and SEPTA region map for base map
+PA <- st_read("PaCounty2024_05.geojson")
+SEPTA_region_map <- PA[PA$COUNTY_NAM %in% c("MONTGOMERY", "BUCKS", "PHILADELPHIA", "DELAWARE", "CHESTER"), ] %>%
+  select(PA_CTY_COD, COUNTY_NAM, FIPS_COUNT)
+
+# Load Center City boundary
+center_city <- st_read("C:/Users/rseptian/OneDrive - SEPTA/01_PROJECT/01_Transit_Priority/Stop_to_Stop_Analysis/20240708_CenterCity/CenterCity.shp")
+
+# Ensure all datasets are in the same CRS
+SEPTA_region_map <- st_transform(SEPTA_region_map, crs = st_crs(stops))
+center_city <- st_transform(center_city, crs = st_crs(stops))
+
+# Perform the spatial intersection for county
+stops <- stops %>%
+  st_join(SEPTA_region_map, left = TRUE, join = st_intersects) %>%
+  rename(county = COUNTY_NAM) %>%
+  mutate(center_city = st_within(stops, center_city, sparse = FALSE))%>%
+  mutate(center_city = rowSums(center_city) > 0)  # Convert logical matrix to vector
+
+# Categorize the stops
+stops <- stops %>%
+  mutate(category = case_when(
+    county == "PHILADELPHIA" & center_city == TRUE ~ "PHILADELPHIA-Center_City",
+    county == "PHILADELPHIA" & center_city == FALSE ~ "PHILADELPHIA-Not_Center_City",
+    TRUE ~ county
+  )) %>%
+  select(-"center_city")
+  
+```
+
+```{r hourly stop data, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+# SET UP HOURLY AVERAGE TRIP DATA FOR EACH BUS STOP
+
+dat_trip_count_hr <- dat %>%
+  filter(mode %in% c("Bus", "Trolleybus", "Trolley")) %>%
+  group_by(stop_id, mode, final_day_type) %>%
+  summarise(trip_count = n(), 
+            All_Routes = paste(unique(route_id), collapse = ", "),
+            .groups = 'drop') %>%
+  mutate(avg_trip_hr = round(trip_count/24)) %>%
+  mutate(log_avg_trip_hr = round(log1p(avg_trip_hr), digits = 0)) %>%
+  mutate(max_freq = ifelse(avg_trip_hr >= 12, "5 MAX",
+                           ifelse (avg_trip_hr >= 6, "10 MAX",
+                           ifelse (avg_trip_hr >= 4, "15 MAX", 
+                           ifelse(avg_trip_hr >= 2, "30 MAX", "60 MAX")))))
+
+dat_trip_count_hr <- left_join(dat_trip_count_hr, stops, by = "stop_id")
+
+dat_trip_count_hr <- st_as_sf(dat_trip_count_hr, coords = c("stop_lon", "stop_lat"), crs = 4326, remove = FALSE)
+
+# sum(dat_trip_count_hr$trip_count) #1980505 <- Always make sure you retain the number of observation
+
+```
+
+```{r service period stop data, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+# SET UP AVERAGE TRIP DATA PER SERVICE PERIOD FOR EACH BUS STOP
+
+dat_trip_count_prd <- dat %>%
+  filter(mode %in% c("Bus", "Trolleybus", "Trolley")) %>%
+  group_by(stop_id, peak_category, mode, final_day_type) %>%
+  summarise(trip_count = n(), 
+            All_Routes = paste(unique(route_id), collapse = ", "),
+            .groups = 'drop') %>%
+  mutate(
+    hours = durations[peak_category],
+    avg_trip_hr = round(trip_count / hours)
+  ) %>%
+  select(-hours) %>%
+  mutate(log_avg_trip_hr = round(log1p(avg_trip_hr), digits = 0)) %>%
+  mutate(max_freq = ifelse(avg_trip_hr >= 12, "5 MAX",
+                           ifelse (avg_trip_hr >= 6, "10 MAX",
+                           ifelse (avg_trip_hr >= 4, "15 MAX", 
+                           ifelse(avg_trip_hr >= 2, "30 MAX", "60 MAX")))))
+
+dat_trip_count_prd <- left_join(dat_trip_count_prd, stops, by = "stop_id")
+
+dat_trip_count_prd <- st_as_sf(dat_trip_count_prd, coords = c("stop_lon", "stop_lat"), crs = 4326, remove = FALSE)
+
+# sum(dat_trip_count_prd$trip_count)  #1980505 <- Always make sure you retain the number of observation
+```
+
+```{r hourly segment data, message=FALSE, warning=FALSE, cache=FALSE, results='hide', eval =FALSE}
+#This chunk wont run on
+# Separate the start_id and end_id based on the stop path (stpPthI)
+dat_swiftly <- swiftly %>%
+  separate(stpPthI, into = c("start_id", "end_id"), sep = "_to_", remove = FALSE, convert = TRUE)
+
+# Identify segment only for bus mode
+dat_segment_bus <- dat %>%
+  filter(mode %in% c("Bus", "Trolleybus", "Trolley")) %>%
+  arrange(trip_id, stop_sequence) %>%  # Ensure data is ordered by trip_id and stop_sequence
+  group_by(trip_id) %>%
+  mutate(
+    start_id = stop_id,  # Assign current stop_id to start_id
+    end_id = lead(stop_id)  # Assign stop_id of the next row in the group to end_id
+  ) %>%
+  ungroup()
+
+# Convert start_id and end_id to character in both datasets to ensure matching
+dat_segment_bus <- dat_segment_bus %>%
+  mutate(
+    start_id = as.character(start_id),
+    end_id = as.character(end_id)
+  ) %>%
+  filter(!is.na(start_id) & !is.na(end_id))  # Remove rows where start_id or end_id is NA, we might rethink how to treat NA values here
+
+# sum(is.na(dat_segment_bus$start_id))
+# sum(is.na(dat_segment_bus$end_id))
+
+dat_swiftly <- dat_swiftly %>%
+  mutate(
+    start_id = as.character(start_id),
+    end_id = as.character(end_id)
+  ) %>%
+  filter(!is.na(start_id) & !is.na(end_id))  # Remove rows where start_id or end_id is NA
+
+# Group by sgmntId and merge geometries
+merged_swiftly <- dat_swiftly %>%
+  group_by(sgmntId) %>%
+  summarise(geometry = st_union(geometry),
+            All_Routes = paste(unique(Route), collapse = ", "),
+            .groups = 'drop')
+
+merged_swiftly <- merged_swiftly %>%
+  mutate(start_id = sub("_to_.*", "", sgmntId),  # Extract start_id
+         end_id = sub(".*_to_", "", sgmntId),    # Extract end_id
+         end_id = sub("_0$", "", end_id))        # Remove trailing "_0" from end_id if necessary
+
+# Using dat_swiftly_21 as the right table to keep it as an sf object
+joined_data <- dat_segment_bus %>%
+  left_join(merged_swiftly, by = c("start_id", "end_id")) %>%
+  filter(!is.na(trip_id))
+
+start_id <- stops %>%
+  rename(start_id = "stop_id", start_name = "stop_name") %>%
+  select(start_id, start_name) %>%
+  mutate(start_id = as.character(start_id)) %>%
+  st_drop_geometry()
+
+end_id <- stops %>%
+  rename(end_id = "stop_id", end_name = "stop_name") %>%
+  select(end_id, end_name) %>%
+  mutate(end_id = as.character(end_id))%>%
+  st_drop_geometry()
+
+joined_data <- joined_data %>%
+  left_join(start_id, by = "start_id") %>%
+  left_join(end_id, by = "end_id")
+
+# Group by sgmntId to find out the trip count and average trip
+joined_data_count <- joined_data %>%
+  filter(!is.na(sgmntId)) %>%
+  group_by(sgmntId, final_day_type, start_name, end_name, mode) %>%
+  summarise(trip_count = n(), .groups = 'drop') %>%
+  mutate(avg_trip_hr = round(trip_count / 24),
+         log_avg_trip_hr = round(log1p(avg_trip_hr), digits = 0),
+         max_freq = ifelse(avg_trip_hr >= 12, "5 MAX",
+                           ifelse (avg_trip_hr >= 6, "10 MAX",
+                           ifelse (avg_trip_hr >= 4, "15 MAX",
+                           ifelse(avg_trip_hr >= 2, "30 MAX", "60 MAX")))))
+
+# sum(joined_data_count$trip_count) #1944667 <- This is the final number of observations after removing data without sgmntID (meaning that no complete start & end id). Always make sure you retain the number of observation
+
+joined_data_sf <- merged_swiftly %>%
+  left_join(joined_data_count, by = "sgmntId")%>%
+  filter(!is.na(trip_count))
+
+# Ensure all datasets are in the same CRS
+SEPTA_region_map <- st_transform(SEPTA_region_map, crs = st_crs(joined_data_sf))
+center_city <- st_transform(center_city, crs = st_crs(joined_data_sf))
+
+# Function to determine the county with the largest intersection
+determine_dominant_county <- function(geometry, region_map) {
+  intersections <- st_intersection(region_map, geometry)
+  if (nrow(intersections) == 0) {
+    return(NA)
+  }
+  largest_intersection <- intersections[which.max(st_area(intersections)), ]
+  return(largest_intersection$COUNTY_NAM)
+}
+
+# Apply the function to each geometry to avoid duplicates. WARNING: Running this part can take up a very long time. You can run this code for the first time only and export it as shp (or other formats) so you do not have to rerun it later. See the codes at the end of this chunk.
+joined_data_sf <- joined_data_sf %>%
+  rowwise() %>%
+  mutate(dominant_county = determine_dominant_county(geometry, SEPTA_region_map)) %>%
+  ungroup()
+
+# Create a logical vector to determine if the stops are within the center_city
+center_city_logical <- st_within(joined_data_sf, center_city, sparse = FALSE)
+center_city_vector <- apply(center_city_logical, 1, any)
+
+# Categorize the stops based on their location
+joined_data_sf <- joined_data_sf %>%
+  mutate(
+    location_category = case_when(
+      dominant_county == "PHILADELPHIA" & center_city_vector ~ "PHILADELPHIA-Center_City",
+      dominant_county == "PHILADELPHIA" & !center_city_vector ~ "PHILADELPHIA-Not_Center_City",
+      TRUE ~ dominant_county
+    )
+  )
+
+# Perform the spatial join for county
+joined_data_sf <- joined_data_sf %>%
+  rename(county = dominant_county)
+
+# sum(joined_data_sf$trip_count) #1944667 <- Always make sure you retain the number of observation
+
+```
+
+```{r import joned_data_sf as geojson, message=FALSE, warning=FALSE, cache=FALSE, results='hide'}
+# st_write(joined_data_sf, "joined_data_sf.geojson")
+joined_data_sf <- st_read("joined_data_sf.geojson") # Run this if the codes running for too long
+
+# If you import the files from .shp, you need to rename the fields, but if it's geojson, you're good to go 
+# joined_data_sf <- joined_data_sf %>%
+#   rename("All_Routes" = All_Rts,
+#          "start_id" = start_d,
+#          "final_day_type" = fnl_dy_,
+#          "start_name" = strt_nm,
+#          "end_name" = end_nam,
+#          "trip_count" = trp_cnt,
+#          "avg_trip_hr" = avg_tr_,
+#          "log_avg_trip_hr" = lg_vg__,
+#          "max_freq" = max_frq,
+#          "location_category" = lctn_ct)
+# 
+# joined_data_sgmnt_sf <- joined_data_sgmnt_sf %>%
+#   rename("All_Routes" = All_Rts,
+#          "start_id" = start_d,
+#          "final_day_type" = fnl_dy_,
+#          "start_name" = strt_nm,
+#          "end_name" = end_nam,
+#          "peak_category" = pk_ctgr,
+#          "trip_count" = trp_cnt,
+#          "avg_trip_hr" = avg_tr_,
+#          "log_avg_trip_hr" = lg_vg__,
+#          "max_freq" = max_frq,
+#          "location_category" = lctn_ct)
+```
+
+
+```{r service period segment data, message=FALSE, warning=FALSE, cache=TRUE, results='hide'}
+# Group by sgmntId to find out the trip count and average trip
+joined_data_count_sgmnt <- joined_data %>%
+  filter(!is.na(sgmntId)) %>%
+  group_by(sgmntId, final_day_type, start_name, end_name, peak_category, mode) %>%
+  summarise(trip_count = n(), .groups = 'drop') %>%
+  mutate(
+    hours = durations[peak_category],
+    avg_trip_hr = round(trip_count / hours),
+    log_avg_trip_hr = round(log1p(avg_trip_hr), digits = 0),
+    max_freq = ifelse(avg_trip_hr >= 12, "5 MAX",
+                           ifelse (avg_trip_hr >= 6, "10 MAX",
+                           ifelse (avg_trip_hr >= 4, "15 MAX", 
+                           ifelse(avg_trip_hr >= 2, "30 MAX", "60 MAX"))))) %>%
+  select(-hours)
+
+# sum(joined_data_count_sgmnt$trip_count) #1944667 <- Always make sure you retain the number of observation
+
+joined_data_sgmnt_sf <- merged_swiftly %>%
+  left_join(joined_data_count_sgmnt, by = "sgmntId")%>%
+  filter(!is.na(trip_count))
+
+# Ensure all datasets are in the same CRS
+SEPTA_region_map <- st_transform(SEPTA_region_map, crs = st_crs(joined_data_sgmnt_sf))
+center_city <- st_transform(center_city, crs = st_crs(joined_data_sgmnt_sf))
+
+# Function to determine the county with the largest intersection
+determine_dominant_county <- function(geometry, region_map) {
+  intersections <- st_intersection(region_map, geometry)
+  if (nrow(intersections) == 0) {
+    return(NA)
+  }
+  largest_intersection <- intersections[which.max(st_area(intersections)), ]
+  return(largest_intersection$COUNTY_NAM)
+}
+
+# Apply the function to each geometry to avoid duplicates. WARNING: Running this part can take up a very long time. You can run this code for the first time only and export it as shp (or other formats) so you do not have to rerun it later. See the codes at the end of this chunk.
+joined_data_sgmnt_sf <- joined_data_sgmnt_sf %>%
+  rowwise() %>%
+  mutate(dominant_county = determine_dominant_county(geometry, SEPTA_region_map)) %>%
+  ungroup()
+
+# Create a logical vector to determine if the stops are within the center_city
+center_city_logical <- st_within(joined_data_sgmnt_sf, center_city, sparse = FALSE)
+center_city_vector <- apply(center_city_logical, 1, any)
+
+# Categorize the stops based on their location
+joined_data_sgmnt_sf <- joined_data_sgmnt_sf %>%
+  mutate(
+    location_category = case_when(
+      dominant_county == "PHILADELPHIA" & center_city_vector ~ "PHILADELPHIA-Center_City",
+      dominant_county == "PHILADELPHIA" & !center_city_vector ~ "PHILADELPHIA-Not_Center_City",
+      TRUE ~ dominant_county
+    )
+  ) %>%
+  rename(county = dominant_county)
+# 
+st_write(joined_data_sgmnt_sf, "joined_data_gmnt_sf_trolley.shp")
+joined_data_sgmnt_sf <- st_read("joined_data_gmnt_sf.shp") # Load this if the codes running for too long
+
+joined_data_sgmnt_sf <- joined_data_sgmnt_sf %>%
+  rename("All_Routes" = All_Rts,
+         "start_id" = start_d,
+         "final_day_type" = fnl_dy_,
+         "start_name" = strt_nm,
+         "end_name" = end_nam,
+         "peak_category" = pk_ctgr,
+         "trip_count" = trp_cnt,
+         "avg_trip_hr" = avg_tr_,
+         "log_avg_trip_hr" = lg_vg__,
+         "max_freq" = max_frq,
+         "location_category" = lctn_ct)
+
+```
+
+## 2 Stop Level Peak Bus Service Analysis
+
+### 2.1 Summary of Methodology
+
+This analysis focuses on determining the frequency of buses on specific bus stop in hourly and service period level. Based on the latest SEPTA GTFS data, the following are the major steps involved in this analysis:  
+  
+1. Data Set Up:Import General Transit Feed Specification (GTFS) data crucial for public transit analysis.  
+Data components include `stops`, `stop times`, `trips`, `shapes`, and `routes`, which are essential for understanding transit operations.This step includes defining the service period (Owl, Early Morning, AM Peak, etc.)  
+2. Perform joining operations to combine stop times with `trips` and `routes`, creating a comprehensive data set. Augment the data set with a mode column based on _route_type_ to distinguish between types of services like _bus_, _metro_, and _trolley_.  
+3. Data Transformation: Align _arrival times_ and _departure times_ and categorize the data into the defined service periods using hour-based conditions.
+This categorization is essential for analyzing specific periods, such as PM Peak.  
+4. Visualization and Specific Analysis: Filter the data set to focus on the _bus_ mode and calculate the average buses per hour at each stop. Integrate spatial data using county geographic boundaries to overlay transit data, creating maps that show bus activity.  
+5. Top Bus Stops Analysis: Drill down into the performance of top bus stops per hour and during various service periods. Identify key activity hubs which can inform decisions on service enhancements or resource allocations.
+
+### 2.2 Average Buses Per Hour at Each Stop
+
+#### 2.2.1 Distribution Maps 
+
+The following map shows the **average buses per hour at each stop** in weekday and weekend.  
+
+```{r average bus hourly interactive, message=FALSE, warning=FALSE, cache=FALSE}
+##############INTERACTIVE MAP##############
+
+SEPTA_region_map <- st_transform(SEPTA_region_map, st_crs(dat_trip_count_hr))
+
+# # Define color palette
+# pal <- colorNumeric(palette = viridisLite::viridis(256, option = "C"), domain = dat_trip_count_hr$avg_trip_hr)
+
+# Define the color codes for bus revolution and reverse them
+bus_revolution_colors <- rev(c("#A6123A", "#655BA6", "#26A699", "#F2AE2E", "#F2E5D5"))
+
+# Create a custom palette function
+bus_revolution_palette <- function(n) {
+  colorRampPalette(bus_revolution_colors)(n)
+}
+
+# Define the color palette for avg_trip_hr using the custom palette function
+pal_bus_revolution <- colorNumeric(palette = bus_revolution_palette(length(unique(dat_trip_count_hr$avg_trip_hr))),
+                                   domain = dat_trip_count_hr$avg_trip_hr)
+
+# Create the leaflet map
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+  addCircleMarkers(data = dat_trip_count_hr %>% filter(final_day_type == "Weekday"),
+                   group = "Weekday",
+                   lng = ~stop_lon, lat = ~stop_lat,
+                   color = ~pal_bus_revolution(avg_trip_hr),
+                   radius = 1,
+                   opacity = 0.8,
+                   popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+                                   "<b>Stop Name:</b> ", stop_name, "<br>",
+                                   "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+                                   "<b>All Routes:</b> ", All_Routes, "<br>",
+                                   "<b>Day Type:</b> ", final_day_type)) %>%
+  addCircleMarkers(data = dat_trip_count_hr %>% filter(final_day_type == "Weekend"),
+                   group = "Weekend",
+                   lng = ~stop_lon, lat = ~stop_lat,
+                   color = ~pal_bus_revolution(avg_trip_hr),
+                   radius = 1,
+                   opacity = 0.8,
+                   popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+                                   "<b>Stop Name:</b> ", stop_name, "<br>",
+                                   "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+                                   "<b>All Routes:</b> ", All_Routes, "<br>",
+                                   "<b>Day Type:</b> ", final_day_type)) %>%
+  addLayersControl(
+    overlayGroups = c("Weekday", "Weekend"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(c("Weekend")) %>%
+  addLegend(pal = pal_bus_revolution, values = dat_trip_count_hr$avg_trip_hr, title = "Avg Buses/Hr",
+            position = "bottomright")
+```
+
+The following map shows the **average buses per hour based on maximum frequency at each stop** in weekday and weekend.
+
+```{r average bus hourly maxfreq, message=FALSE, warning=FALSE, cache=FALSE}
+# Ensure max_freq is a factor with levels matching the colors
+dat_trip_count_hr$max_freq <- factor(dat_trip_count_hr$max_freq, levels = c("5 MAX", "10 MAX", "15 MAX", "30 MAX", "60 MAX"))
+
+# Define the color palette for max_freq
+max_freq_colors <- c("5 MAX" = "#4B0082", "10 MAX" = "#FF4500", "15 MAX" = "#A6123A", "30 MAX" = "#26A699", "60 MAX" = "#F2AE2E")
+pal_max_freq <- colorFactor(palette = max_freq_colors, domain = dat_trip_count_hr$max_freq)
+
+# Debugging: Check if max_freq values match the levels
+print(unique(dat_trip_count_hr$max_freq))
+
+# # Generate the list for overlayGroups with the desired order
+# overlay_groups <- expand.grid(final_day_type = c("Weekday", "Weekend"), peak_category = peak_order) %>%
+#   mutate(group_name = paste(final_day_type, peak_category, sep = "_")) %>%
+#   pull(group_name)
+
+# Create the leaflet map
+m_avg_trip_hr <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+  addCircleMarkers(data = dat_trip_count_hr %>% filter(final_day_type == "Weekday"),
+                   group = "Weekday",
+                   lng = ~stop_lon, lat = ~stop_lat,
+                   color = ~pal_max_freq(max_freq),
+                   radius = 1,
+                   opacity = 0.8,
+                   popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+                                   "<b>Stop Name:</b> ", stop_name, "<br>",
+                                   "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+                                   "<b>Max Frequency:</b> ", max_freq, "<br>",
+                                   "<b>All Routes:</b> ", All_Routes, "<br>",
+                                   "<b>Day Type:</b> ", final_day_type)) %>%
+  addCircleMarkers(data = dat_trip_count_hr %>% filter(final_day_type == "Weekend"),
+                   group = "Weekend",
+                   lng = ~stop_lon, lat = ~stop_lat,
+                   color = ~pal_max_freq(max_freq),
+                   radius = 1,
+                   opacity = 0.8,
+                   popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+                                   "<b>Stop Name:</b> ", stop_name, "<br>",
+                                   "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+                                   "<b>Max Frequency:</b> ", max_freq, "<br>",
+                                   "<b>All Routes:</b> ", All_Routes, "<br>",
+                                   "<b>Day Type:</b> ", final_day_type)) %>%
+  addLayersControl(
+    overlayGroups = c("Weekday", "Weekend"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(c("Weekend")) %>%
+  addLegend(pal = pal_max_freq, values = dat_trip_count_hr$max_freq, title = "Max Frequency",
+            position = "bottomright")
+
+m_avg_trip_hr
+```
+
+```{r average bus hourly maxfreq export, eval=FALSE, include=FALSE}
+# EXPORT TO PNG. Run this code only if you want to export as PNG. You can manually transform them into GIF
+
+# # Define color palette for max_freq
+# max_freq_colors <- c("5 MAX" = "#4B0082", "10 MAX" = "#FF4500", "15 MAX" = "#A6123A", "30 MAX" = "#26A699", "60 MAX" = "#F2AE2E")
+# pal_max_freq <- colorFactor(palette = max_freq_colors, domain = names(max_freq_colors))
+# 
+# # Function to create map and save as HTML
+# create_and_save_map <- function(data, day_type, filename) {
+#   map <- leaflet() %>%
+#     addProviderTiles(providers$CartoDB.Positron) %>%
+#     addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+#     addCircleMarkers(data = data %>% filter(final_day_type == day_type),
+#                      lng = ~stop_lon, lat = ~stop_lat,
+#                      color = ~pal_max_freq(max_freq),
+#                      radius = 3,
+#                      opacity = 0.8,
+#                      popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+#                                      "<b>Stop Name:</b> ", stop_name, "<br>",
+#                                      "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+#                                      "<b>Max Frequency:</b> ", max_freq, "<br>",
+#                                      "<b>All Routes:</b> ", All_Routes, "<br>",
+#                                      "<b>Day Type:</b> ", final_day_type)) %>%
+#     addLayersControl(
+#       overlayGroups = c("Weekday", "Weekend"),
+#       options = layersControlOptions(collapsed = FALSE)
+#     ) %>%
+#     hideGroup(c("Weekday", "Weekend")) %>%
+#     addLegend(pal = pal_max_freq, values = names(max_freq_colors), title = "Max Frequency",
+#               position = "bottomright")
+#   
+#   # Save map as HTML
+#   saveWidget(map, filename, selfcontained = TRUE)
+# }
+# 
+# # Create and save weekday map
+# create_and_save_map(dat_trip_count_hr, "Weekday", "m_avg_trip_weekday.html")
+# 
+# # Create and save weekend map
+# create_and_save_map(dat_trip_count_hr, "Weekend", "m_avg_trip_weekend.html")
+# 
+# # Capture screenshot of weekday map using webshot
+# webshot("m_avg_trip_weekday.html", "m_avg_trip_weekday.png", vwidth = 1200, vheight = 800)
+# 
+# # Capture screenshot of weekend map using webshot
+# webshot("m_avg_trip_weekend.html", "m_avg_trip_weekend.png", vwidth = 1200, vheight = 800)
+# 
+# # Optional: Remove the HTML files after screenshots captured
+# file.remove("m_avg_trip_weekday.html")
+# file.remove("m_avg_trip_weekend.html")
+
+```
+
+#### 2.2.2 Summary Table of Top 10 Bus Stops by Average Trips Per Hour
+
+The table below lists the top ten bus stops in terms of hourly average trips in the weekday. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. Frankford Transportation Center - Main Dropoff  
+2. 69th St Transportation Center South Terminal  
+3. Market St & 15th St  
+4. Market St & 18th St  
+5. Market St & 16th St  
+6. Cheltenham Av & Ogontz Av Loop  
+7. JFK Blvd & 15th St  
+8. JFK Blvd & 17th St  
+9. Pier 70 WalMart & Home Depot  
+10. 69th St Transit Center  
+
+On the other hand, weekend-service trip shows a slightly different insight:  
+  
+1. Frankford Transportation Center - Main Dropoff  
+2. 69th St Transportation Center South Terminal  
+3. Market St & 15th St  
+4. Cheltenham Av & Ogontz Av Loop  
+5. Market St & 18th St  
+6. Market St & 16th St  
+7. Wissahickon Transportation Center - onsite  
+8. JFK Blvd & 15th St  
+9. JFK Blvd & 17th St  
+10. Pier 70 WalMart & Home Depot  
+
+
+```{r top 10 stops table, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 10 stops for 'mode' == 'bus' on the weekday
+top_stops_hr_weekday <- dat_trip_count_hr %>%
+  filter(final_day_type == "Weekday") %>%
+  select(stop_id, stop_name, avg_trip_hr, All_Routes) %>%
+  arrange(desc(avg_trip_hr)) %>%
+  slice_head(n = 10)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_hr_weekday, "html", booktabs = TRUE, 
+      caption = "Top 10 Bus Stops by Average Trips Per Hour on the Weekday",
+      align = c('l', rep('l', ncol(top_stops_hr_weekday) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;")
+
+# Filter and select the top 10 stops for 'mode' == 'bus' on the weekend
+top_stops_hr_weekend <- dat_trip_count_hr %>%
+  filter(final_day_type == "Weekend") %>%
+  select(stop_id, stop_name, avg_trip_hr, All_Routes) %>%
+  arrange(desc(avg_trip_hr)) %>%
+  slice_head(n = 10)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_hr_weekend, "html", booktabs = TRUE, 
+      caption = "Top 10 Bus Stops by Average Trips Per Hour on the Weekend",
+      align = c('l', rep('l', ncol(top_stops_hr_weekday) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") 
+```
+
+```{r top 10 stops table export, eval=FALSE, include=FALSE}
+# # EXPORT TABLE AS PNG. Run this code only if you want to export them as PNG
+# 
+# # Filter and select the top 10 stops for 'mode' == 'bus' on the weekday
+# top_stops_hr_weekday <- dat_trip_count_hr %>%
+#   filter(final_day_type == "Weekday") %>%
+#   select(stop_id, stop_name, avg_trip_hr, All_Routes) %>%
+#   arrange(desc(avg_trip_hr)) %>%
+#   slice_head(n = 10)
+# 
+# # Create a table with kable and enhance it with kableExtra
+# weekday_table <- kable(top_stops_hr_weekday, "html", booktabs = TRUE, caption = "Top 10 Bus Stops by Average Trips Per Hour on the Weekday") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+#   column_spec(1, bold = TRUE, color = "blue")
+# 
+# # Save the weekday table as HTML
+# save_kable(weekday_table, file = "weekday_top_10.html")
+# 
+# # Convert the HTML to PNG
+# webshot("weekday_top_10.html", file = "weekday_top_10.png")
+# 
+# # Filter and select the top 10 stops for 'mode' == 'bus' on the weekend
+# top_stops_hr_weekend <- dat_trip_count_hr %>%
+#   filter(final_day_type == "Weekend") %>%
+#   select(stop_id, stop_name, avg_trip_hr, All_Routes) %>%
+#   arrange(desc(avg_trip_hr)) %>%
+#   slice_head(n = 10)
+# 
+# # Create a table with kable and enhance it with kableExtra
+# weekend_table <- kable(top_stops_hr_weekend, "html", booktabs = TRUE, caption = "Top 10 Bus Stops by Average Trips Per Hour on the Weekend") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+#   column_spec(1, bold = TRUE, color = "blue")
+# 
+# # Save the weekend table as HTML
+# save_kable(weekend_table, file = "weekend_top_10.html")
+# 
+# # Convert the HTML to PNG
+# webshot("weekend_top_10.html", file = "weekend_top_10.png")
+# 
+# # Exclude PHILADELPHIA-Center_City and filter for Weekday data
+# dat_filtered <- dat_trip_count_hr %>%
+#   filter(final_day_type == "Weekday", category != "PHILADELPHIA-Center_City")
+# 
+# # Function to get top 5 stops per county
+# get_top_stops_per_category <- function(data, n = 5) {
+#   data %>%
+#     group_by(category) %>%
+#     select(stop_id, stop_name, avg_trip_hr, max_freq, All_Routes, category) %>%
+#     arrange(desc(avg_trip_hr)) %>%
+#     slice_head(n = n) %>%
+#     ungroup()
+# }
+# 
+# # Get top 5 stops per county
+# top_stops_hr_weekday <- get_top_stops_per_category(dat_filtered, n = 5)
+# 
+# # Create the table for Weekday
+# top_stops_table_weekday <- kable(top_stops_hr_weekday, "html", booktabs = TRUE, caption = "Top 5 Bus Stops by Average Trips Per Hour on the Weekday (Excluding PHILADELPHIA-Center_City)") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+#   column_spec(1, bold = TRUE, color = "blue")
+# 
+# # Save the top stops table for weekday as HTML
+# save_kable(top_stops_table_weekday, file = "top_stops_weekday.html")
+# 
+# # Convert the HTML to PNG
+# webshot("top_stops_weekday.html", file = "top_stops_weekday.png")
+# 
+# # Repeat the process for Weekend data
+# dat_filtered_weekend <- dat_trip_count_hr %>%
+#   filter(final_day_type == "Weekend", category != "PHILADELPHIA-Center_City")
+# 
+# # Get top 5 stops per county for Weekend
+# top_stops_hr_weekend <- get_top_stops_per_category(dat_filtered_weekend, n = 5)
+# 
+# # Create the table for Weekend
+# top_stops_table_weekend <- kable(top_stops_hr_weekend, "html", booktabs = TRUE, caption = "Top 5 Bus Stops by Average Trips Per Hour on the Weekend (Excluding PHILADELPHIA-Center_City)") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+#   column_spec(1, bold = TRUE, color = "blue")
+# 
+# # Save the top stops table for weekend as HTML
+# save_kable(top_stops_table_weekend, file = "top_stops_weekend.html")
+# 
+# # Convert the HTML to PNG
+# webshot("top_stops_weekend.html", file = "top_stops_weekend.png")
+
+```
+
+```{r top 5 stops table, message=FALSE, warning=FALSE, cache=TRUE}
+# Define a custom palette for the categories
+category_colors <- c(
+  "BUCKS" = "#A9D08E",
+  "CHESTER" = "#FFD966",
+  "DELAWARE" = "#F4B084",
+  "MONTGOMERY" = "#D5A6BD",
+  "PHILADELPHIA-Not_Center_City" = "#A4C2F4"
+)
+
+# Example with Weekday data
+dat_filtered_weekday <- dat_trip_count_hr %>%
+  filter(final_day_type == "Weekday" & category != "PHILADELPHIA-Center_City")
+
+# Function to get top 5 stops per category
+get_top_stops_per_category <- function(data, n = 5) {
+  data %>%
+    group_by(category) %>%
+    select(stop_id, stop_name, avg_trip_hr, max_freq, All_Routes, category) %>%
+    arrange(desc(avg_trip_hr)) %>%
+    slice_head(n = n) %>%
+    ungroup()
+}
+
+# Get top 5 stops per category for Weekday
+top_stops_hr_weekday <- get_top_stops_per_category(dat_filtered_weekday, n = 5)
+
+# Create the table for Weekday with row colors
+kable(top_stops_hr_weekday, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips Per Hour on the Weekday",
+      align = c('l', rep('l', ncol(top_stops_hr_weekday) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") 
+
+# Repeat the process for Weekend data
+dat_filtered_weekend <- dat_trip_count_hr %>%
+  filter(final_day_type == "Weekend", category != "PHILADELPHIA-Center_City")
+
+# Get top 5 stops per county for Weekend
+top_stops_hr_weekend <- get_top_stops_per_category(dat_filtered_weekend, n = 5)
+
+# Create the table for Weekend
+kable(top_stops_hr_weekend, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips Per Hour on the Weekend",
+      align = c('l', rep('l', ncol(top_stops_hr_weekend) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") 
+```
+
+```{r top 10 trolley stops table, message=FALSE, warning=FALSE, cache=TRUE}
+# Example with Weekday data
+dat_filtered_weekday_trolley <- dat_filtered_weekday %>%
+  filter(mode == "Trolley")
+
+# Function to get top 5 stops per category
+get_top_stops_per_category <- function(data, n = 10) {
+  data %>%
+    group_by(category) %>%
+    select(stop_id, stop_name, avg_trip_hr, max_freq, mode, All_Routes, category) %>%
+    arrange(desc(avg_trip_hr)) %>%
+    slice_head(n = n) %>%
+    ungroup()
+}
+
+# Get top 5 stops per category for Weekday
+top_stops_hr_weekday_trolley <- get_top_stops_per_category(dat_filtered_weekday_trolley, n = 10)
+
+# Create the table for Weekday with row colors
+kable(top_stops_hr_weekday_trolley, "html", booktabs = TRUE, 
+      caption = "Top 10 Trolley Stops by Average Trips Per Hour on the Weekday",
+      align = c('l', rep('l', ncol(top_stops_hr_weekday) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") 
+```
+
+
+### 2.3 Average Buses Per Service Period at Each Stop
+
+#### 2.3.1 Distribution Maps 
+
+The following maps show the **average buses per service period at each stop** for the weekday service.  
+
+```{r average bus period, message=FALSE, warning=FALSE, cache=FALSE}
+########################INTERACTIVE MAP###########################
+
+# sum(joined_data_count$trip_count)
+
+SEPTA_region_map <- st_transform(SEPTA_region_map, st_crs(dat_trip_count_prd))
+
+# Define the desired order for peak categories
+peak_order <- c("Owl", "Early Morning", "AM Peak", "Mid Day", "PM Peak", "Evening", "Late Night")
+
+# Define the color palette
+pal_2 <- colorNumeric(palette = bus_revolution_palette(length(unique(dat_trip_count_prd$avg_trip_hr))),
+                                   domain = dat_trip_count_prd$avg_trip_hr)
+
+# Generate the list for overlayGroups with the desired order
+overlay_groups <- expand.grid(final_day_type = c("Weekday", "Weekend"), peak_category = peak_order) %>%
+  mutate(group_name = paste(final_day_type, peak_category, sep = "_")) %>%
+  pull(group_name)
+
+# Initialize the leaflet map
+m <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE)
+
+# Add markers for each combination of final_day_type and peak_category
+for (day_type in unique(dat_trip_count_prd$final_day_type)) {
+  for (peak in unique(dat_trip_count_prd$peak_category)) {
+    filtered_data <- dat_trip_count_prd %>%
+      filter(final_day_type == day_type, peak_category == peak)
+    
+    m <- m %>%
+      addCircleMarkers(data = filtered_data,
+                       group = paste(day_type, peak, sep = "_"),
+                       ~stop_lon, ~stop_lat,
+                       color = ~pal_2(avg_trip_hr),
+                       radius = 1,
+                       opacity = 0.8,
+                       popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+                                       "<b>Stop Name:</b> ", stop_name, "<br>",
+                                       "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+                                       "<b>All Routes:</b> ", All_Routes, "<br>",
+                                       "<b>Day Type:</b> ", final_day_type, "<br>",
+                                       "<b>Peak Category:</b> ", peak_category))
+  }
+}
+
+# Add the overlayGroups to the map
+m <- m %>%
+  addLayersControl(
+    overlayGroups = overlay_groups,
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(overlay_groups[overlay_groups != "Weekday_Owl"]) %>%
+  addLegend(pal = pal_2,
+            values = dat_trip_count_prd$avg_trip_hr,
+            title = "Avg Buses/Hr",
+            position = "bottomleft")
+
+# Print the map
+m
+```
+
+```{r average bus period gif, eval=FALSE, include=FALSE}
+# Save the Leaflet map as an HTML file
+# saveWidget(m, "average_bus_period_map.html")
+# 
+# # Function to capture screenshots of the map with different overlayGroups
+# capture_screenshot <- function(overlay_group, file_name) {
+#   m <- m %>% showGroup(overlay_group)
+#   saveWidget(m, "temp_map.html")
+#   webshot("temp_map.html", file_name, vwidth = 800, vheight = 600, cliprect = "viewport")
+# }
+# 
+# # Capture screenshots for each overlay group
+# for (overlay_group in overlay_groups) {
+#   capture_screenshot(overlay_group, paste0("screenshot_average_bus_period_map", overlay_group, ".png"))
+# }
+# 
+# # Combine screenshots into a GIF
+# images <- image_read(list.files(pattern = "screenshot_average_bus_period_map.*\\.png"))
+# animation <- image_animate(images, fps = 1)
+# image_write(animation, "average_bus_period_map_map.gif")
+# 
+# # Clean up temporary files
+# file.remove(list.files(pattern = "screenshot_average_bus_period_map.*\\.png"))
+# file.remove("temp_map.html")
+```
+
+The following maps show the **average buses per service period**, **based on maximum frequency**, at each stop for the weekday service.  
+
+```{r average bus period maxfreq, message=FALSE, warning=FALSE, cache=FALSE}
+# Ensure max_freq is a factor with levels matching the colors
+dat_trip_count_prd$max_freq <- factor(dat_trip_count_prd$max_freq, levels = c("5 MAX", "10 MAX", "15 MAX", "30 MAX", "60 MAX"))
+
+# Define the color palette for max_freq
+max_freq_colors <- c("5 MAX" = "#4B0082", "10 MAX" = "#FF4500", "15 MAX" = "#A6123A", "30 MAX" = "#26A699", "60 MAX" = "#F2AE2E")
+pal_max_freq_2 <- colorFactor(palette = max_freq_colors, domain = dat_trip_count_prd$max_freq)
+
+# Generate the list for overlayGroups with the desired order
+overlay_groups <- expand.grid(final_day_type = c("Weekday", "Weekend"), peak_category = peak_order) %>%
+  mutate(group_name = paste(final_day_type, peak_category, sep = "_")) %>%
+  pull(group_name)
+
+# Initialize the leaflet map
+m_max_freq <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE)
+
+# Add markers for each combination of final_day_type and peak_category
+for (day_type in unique(dat_trip_count_prd$final_day_type)) {
+  for (peak in peak_order) {  # Use the ordered peak categories
+    filtered_data <- dat_trip_count_prd %>%
+      filter(final_day_type == day_type, peak_category == peak)
+    
+    m_max_freq <- m_max_freq %>%
+      addCircleMarkers(data = filtered_data,
+                       group = paste(day_type, peak, sep = "_"),
+                       ~stop_lon, ~stop_lat,
+                       color = ~pal_max_freq_2(max_freq),
+                       radius = 1,
+                       opacity = 0.8,
+                       popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+                                       "<b>Stop Name:</b> ", stop_name, "<br>",
+                                       "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+                                       "<b>Max Frequency:</b> ", max_freq, "<br>",
+                                       "<b>Mode:</b> ", mode, "<br>",
+                                       "<b>All Routes:</b> ", All_Routes, "<br>",
+                                       "<b>Day Type:</b> ", final_day_type, "<br>",
+                                       "<b>Peak Category:</b> ", peak_category))
+  }
+}
+
+# Add the overlayGroups to the map
+m_max_freq <- m_max_freq %>%
+  addLayersControl(
+    overlayGroups = overlay_groups,
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(overlay_groups[overlay_groups != "Weekday_Owl"]) %>%
+  addLegend(pal = pal_max_freq_2,
+            values = dat_trip_count_prd$max_freq,
+            title = "Max Frequency",
+            position = "bottomleft")
+
+# Print the map
+m_max_freq
+```
+
+```{r average bus period maxfreq export, eval=FALSE, include=FALSE}
+# # Define the color palette for max_freq
+# max_freq_colors <- c("5 MAX" = "#4B0082", "10 MAX" = "#FF4500", "15 MAX" = "#A6123A", "30 MAX" = "#26A699", "60 MAX" = "#F2AE2E")
+# pal_max_freq_2 <- colorFactor(palette = max_freq_colors, domain = dat_trip_count_prd$max_freq)
+
+# # Filter the data for weekdays only
+# weekday_data <- dat_trip_count_prd %>% filter(final_day_type == "Weekday")
+# 
+# # # Generate the list for overlayGroups
+# # overlay_groups <- unique(paste(weekday_data$final_day_type, weekday_data$peak_category, sep = "_"))
+# 
+# # Create function to create the map and save as PNG
+# save_map_as_png <- function(day_type, peak) {
+#   filtered_data <- weekday_data %>%
+#     filter(final_day_type == day_type, peak_category == peak)
+# 
+#   m_max_freq <- leaflet() %>%
+#     addProviderTiles(providers$CartoDB.Positron) %>%
+#     addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+#     addCircleMarkers(data = filtered_data,
+#                      ~stop_lon, ~stop_lat,
+#                      color = ~pal_max_freq_2(max_freq),
+#                      radius = 1,
+#                      opacity = 0.8,
+#                      popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+#                                      "<b>Stop Name:</b> ", stop_name, "<br>",
+#                                      "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+#                                      "<b>Max Frequency:</b> ", max_freq, "<br>",
+#                                      "<b>Mode:</b> ", mode, "<br>",
+#                                      "<b>All Routes:</b> ", All_Routes, "<br>",
+#                                      "<b>Day Type:</b> ", final_day_type, "<br>",
+#                                      "<b>Peak Category:</b> ", peak_category)) %>%
+#     addLegend(pal = pal_max_freq_2,
+#               values = weekday_data$max_freq,
+#               title = "Max Frequency",
+#               position = "bottomright")
+# 
+#   # Save the map as an HTML file
+#   file_name_html <- paste0("max_freq_map_", day_type, "_", peak, ".html")
+#   saveWidget(m_max_freq, file = file_name_html, selfcontained = FALSE)
+# 
+#   # Save the map as a PNG file
+#   file_name_png <- paste0("max_freq_map_", day_type, "_", peak, ".png")
+#   webshot(file_name_html, file_name_png, vwidth = 1200, vheight = 800)
+# }
+# 
+# # Loop through each combination of final_day_type and peak_category to create and save maps
+# for (peak in unique(weekday_data$peak_category)) {
+#   save_map_as_png("Weekday", peak)
+# }
+```
+
+
+#### 2.3.2 Summary of Top 5 Bus Stops per Service Period
+
+##### Owl
+
+The table below lists the top five bus stops in terms of average trips during the Owl period. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. 69th St Transportation Center South Terminal  
+2. Market St & 15th St  
+3. Fern Rock Transportation Center  
+4. Frankford Transportation Center - Main Dropoff  
+5. Broad St & Pattison Av - 3 FS  
+
+```{r dat trip ct wide, message=FALSE, warning=FALSE, cache=TRUE, results='hide'}
+dat_trip_count_wide <- dat_trip_count_prd %>%
+  select(-trip_count, -log_avg_trip_hr) %>%
+  pivot_wider(
+    names_from = peak_category,
+    values_from = avg_trip_hr,
+    names_glue = "{peak_category}_avg", # This will separate the category names and measure names with an underscore
+    values_fill = list(avg_trip_hr = 0)  # Fill NA values with zero
+  )
+
+dat_trip_count_wide <- st_as_sf(dat_trip_count_wide, coords = c("stop_lon", "stop_lat"), crs = 4326, remove = FALSE)
+```
+
+```{r top 5 owl, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops for 'mode' == 'bus' during Owl period
+top_stops_period_owl <- dat_trip_count_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(stop_id, stop_name, Owl_avg, mode, All_Routes) %>%
+  arrange(desc(Owl_avg)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_period_owl, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Owl Period",
+      align = c('l', rep('l', ncol(top_stops_period_owl) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;")
+```
+
+##### Early Morning
+
+The table below lists the top five bus stops in terms of average trips during the Early Morning period. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. 69th St Transportation Center South Terminal  
+2. Market St & 15th St  
+3. PNC Center    
+4. 23rd St & Venango St Loop  
+5. Fern Rock Transportation Center  
+
+```{r top 5 early morning, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops for 'mode' == 'bus' during Early Morning
+top_stops_period_early_morning <- dat_trip_count_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  filter(final_day_type == "Weekday") %>%
+  select(stop_id, stop_name, `Early Morning_avg`, All_Routes) %>%
+  arrange(desc(`Early Morning_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_period_early_morning, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Early Morning Period",
+      align = c('l', rep('l', ncol(top_stops_period_early_morning) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", width = "10em", extra_css = "text-align: right;")
+```
+
+##### AM Peak
+
+The table below lists the top five bus stops in terms of average trips during the AM Peak period. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. Frankford Transportation Center - Main Dropoff  
+2. 69th St Transportation Center South Terminal  
+3. Market St & 15th St  
+4. Market St & 18th St  
+5. 69th St Transit Center    
+
+```{r top 5 am peak, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 10 stops for 'mode' == 'bus'
+top_stops_period_am_peak <- dat_trip_count_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(stop_id, stop_name, `AM Peak_avg`, All_Routes) %>%
+  arrange(desc(`AM Peak_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_period_am_peak, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at AM Peak Period",
+      align = c('l', rep('l', ncol(top_stops_period_am_peak) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", width = "8em",extra_css = "text-align: right;")
+```
+
+##### Mid Day
+
+The table below lists the top five bus stops in terms of average trips during the Mid Day period. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. Frankford Transportation Center - Main Dropoff  
+2. 69th St Transportation Center South Terminal  
+3. Cheltenham Av & Ogontz Av Loop  
+4. Market St & 15th St  
+5. Market St & 18th St    
+
+```{r top 5 midday, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 10 stops for 'mode' == 'bus'
+top_stops_period_mid_day <- dat_trip_count_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(stop_id, stop_name, `Mid Day_avg`, All_Routes) %>%
+  arrange(desc(`Mid Day_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_period_mid_day, format = "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Mid Day Peak Period",
+      align = c('l', rep('l', ncol(top_stops_period_mid_day) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", width = "8em",extra_css = "text-align: right;")
+```
+
+##### PM Peak
+
+The table below lists the top five bus stops in terms of average trips during the PM Peak period. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. Frankford Transportation Center - Main Dropoff  
+2. Market St & 15th St  
+3. Market St & 18th St  
+4. Market St & 16th St  
+5. JFK Blvd & 15th St 
+
+```{r top 5 pm peak, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 10 stops for 'mode' == 'bus'
+top_stops_period_pm_peak <- dat_trip_count_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(stop_id, stop_name, `PM Peak_avg`, All_Routes) %>%
+  arrange(desc(`PM Peak_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_period_pm_peak, format = "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at PM Peak Period",
+      align = c('l', rep('l', ncol(top_stops_period_pm_peak) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", width = "8em",extra_css = "text-align: right;")
+
+```
+
+##### Evening
+
+The table below lists the top five bus stops in terms of average trips during the Evening period. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. Frankford Transportation Center - Main Dropoff  
+2. 69th St Transportation Center South Terminal    
+3. Market St & 15th St  
+4. Market St & 18th St  
+5. Market St & 16th St 
+
+```{r top 5 evening, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops for 'mode' == 'bus' during Evening
+top_stops_period_evening <- dat_trip_count_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(stop_id, stop_name, Evening_avg, All_Routes) %>%
+  arrange(desc(Evening_avg)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_period_evening, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Evening Period",
+      align = c('l', rep('l', ncol(top_stops_period_evening) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", width = "8em",extra_css = "text-align: right;")
+```
+
+##### Late Night
+
+The table below lists the top five bus stops in terms of average trips during the Late Night period. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. 69th St Transportation Center South Terminal  
+2. Frankford Transportation Center - Main Dropoff  
+3. Cheltenham Av & Ogontz Av Loop  
+4. Market St & 15th St  
+5. Market St & 18th St
+
+```{r top 5 late night, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops for 'mode' == 'bus' during Evening
+top_stops_period_late_night <- dat_trip_count_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(stop_id, stop_name, `Late Night_avg`, All_Routes) %>%
+  arrange(desc(`Late Night_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_stops_period_late_night, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Evening Period",
+      align = c('l', rep('l', ncol(top_stops_period_evening) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(3, bold = TRUE, color = "#A6123A", width = "8em",extra_css = "text-align: right;")
+```
+
+
+## 3 Segment Level Peak Bus Service Analysis
+
+### 3.1 Summary of Methodology
+    
+This analysis focuses on determining the frequency of buses stop-to-stop (segment) level in hourly manner and service period level. Based on the latest SEPTA GTFS data, the following are the major steps involved in this analysis:  
+  
+1. Data Set Up: using the same GTFS data from stop level analysis, this analysis involves Swiftly data providing segment id on current bus services. This step includes breaking down segment path into start_id and end_id to furtherly help us identify stops included in each trip. Converted start_id and end_id to character type in both datasets to ensure matching.   
+2. Merge Geometries by Segment ID: ss the swiftly dataset has multiple segment ID (sgmntId), the data was grouped by sgmntId and merged geometries to handle duplicates.   
+3. Join Datasets by Start and End IDs: joined the dat_all dataset with dat_swiftly by start_id and end_id, ensuring all geometries are kept.  
+4. Group by Segment ID to Calculate Trip Count and Average Trip: filtered out rows with NA in sgmntId, grouped by sgmntId to calculate trip_count and avg_trip_hr.  
+5. Merge Trip Count Data with Geometries: joined the calculated trip count data with the merged geometries.  
+6. Visualization and Specific Analysis: Filter the dataset to focus on the bus mode and calculate the average buses per hour at each segment.     
+7. Top Segment Analysis: Drill down into the performance of top segments during various service periods. Identify key activity hubs which can inform decisions on service enhancements or resource allocations.  
+
+### 3.2 Average Buses Per Hour at Each Segment 
+
+#### 3.2.1 Distribution Maps 
+
+The following map shows the **average buses per hour at each segment** in weekday and weekend.
+
+```{r average bus hourly segment plot, message=FALSE, warning=FALSE, cache=FALSE}
+# Define the color codes for bus revolution and reverse them
+bus_revolution_colors <- rev(c("#A6123A", "#655BA6", "#26A699", "#F2AE2E", "#F2E5D5"))
+
+# Create a custom palette function
+bus_revolution_palette <- function(n) {
+  colorRampPalette(bus_revolution_colors)(n)
+}
+
+# Create the interactive map
+pal_3 <- colorNumeric(palette = bus_revolution_palette(length(unique(joined_data_sf$avg_trip_hr))),
+                                   domain = joined_data_sf$avg_trip_hr)
+
+n <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+  addPolylines(data = joined_data_sf %>% filter(final_day_type == "Weekday"),
+               color = ~pal_3(avg_trip_hr),
+               weight = 2, opacity = 0.8, 
+               popup = ~paste0("<b>Segment ID:</b>", sgmntId, "<br>",
+                               "<b>Start Name:</b> ", start_name, "<br>",
+                               "<b>End Name:</b> ", end_name, "<br>",
+                               "<b>Avg Trips/Hour:</b>", avg_trip_hr, "<br>",
+                               "<b>All Routes:</b> ", All_Routes, "<br>",
+                               "<b>Day Type:</b> ", final_day_type),
+               group = "Weekday") %>%
+  addPolylines(data = joined_data_sf %>% filter(final_day_type == "Weekend"),
+               color = ~pal_3(avg_trip_hr),
+               weight = 2, opacity = 0.8, 
+               popup = ~paste0("<b>Segment ID:</b>", sgmntId, "<br>",
+                               "<b>Start Name:</b> ", start_name, "<br>",
+                               "<b>End Name:</b> ", end_name, "<br>",
+                               "<b>Avg Trips/Hour:</b>", avg_trip_hr, "<br>",
+                               "<b>All Routes:</b> ", All_Routes, "<br>",
+                               "<b>Day Type:</b> ", final_day_type),
+               group = "Weekend") %>%
+  addLegend(pal = pal_3,
+            values = joined_data_sf$avg_trip_hr,
+            title = "Avg Trips/Hr",
+            position = "bottomright") %>%
+  addLayersControl(
+    overlayGroups = c("Weekday", "Weekend"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(c("Weekend"))
+
+# Print the map
+n
+```
+
+The following map shows the **average buses per hour based on maximum frequency at each segment** in weekday and weekend.
+
+```{r average bus hourly segment maxfreq, message=FALSE, warning=FALSE, cache=FALSE}
+# Ensure max_freq is a factor with levels matching the colors
+joined_data_sf$max_freq <- factor(joined_data_sf$max_freq, levels = c("5 MAX", "10 MAX", "15 MAX", "30 MAX", "60 MAX"))
+
+# Define the color palette for max_freq
+max_freq_colors <- c("5 MAX" = "#4B0082", "10 MAX" = "#FF4500", "15 MAX" = "#A6123A", "30 MAX" = "#26A699", "60 MAX" = "#F2AE2E")
+pal_3_max_freq <- colorFactor(palette = max_freq_colors, domain = joined_data_sf$max_freq)
+
+n_max_freq <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+  addPolylines(data = joined_data_sf %>% filter(final_day_type == "Weekday"),
+               color = ~pal_3_max_freq(max_freq),
+               weight = 2, opacity = 0.8, 
+               popup = ~paste0("<b>Segment ID:</b>", sgmntId, "<br>",
+                               "<b>Start Name:</b> ", start_name, "<br>",
+                               "<b>End Name:</b> ", end_name, "<br>",
+                               "<b>Avg Trips/Hour:</b>", avg_trip_hr, "<br>",
+                               "<b>Maximum Frequency:</b>", max_freq, "<br>",
+                               "<b>All Routes:</b> ", All_Routes, "<br>",
+                               "<b>Day Type:</b> ", final_day_type),
+               group = "Weekday") %>%
+  addPolylines(data = joined_data_sf %>% filter(final_day_type == "Weekend"),
+               color = ~pal_3_max_freq(max_freq),
+               weight = 2, opacity = 0.8, 
+               popup = ~paste0("<b>Segment ID:</b>", sgmntId, "<br>",
+                               "<b>Start Name:</b> ", start_name, "<br>",
+                               "<b>End Name:</b> ", end_name, "<br>",
+                               "<b>Avg Trips/Hour:</b>", avg_trip_hr, "<br>",
+                               "<b>Maximum Frequency:</b>", max_freq, "<br>",
+                               "<b>All Routes:</b> ", All_Routes, "<br>",
+                               "<b>Day Type:</b> ", final_day_type),
+               group = "Weekend") %>%
+  addLegend(pal = pal_3_max_freq,
+            values = joined_data_sf$max_freq,
+            title = "Max Frequency",
+            position = "bottomright") %>%
+  addLayersControl(
+    overlayGroups = c("Weekday", "Weekend"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(c("Weekend"))
+
+# Print the map
+n_max_freq
+```
+
+```{r average bus hourly segment maxfreq export, eval=FALSE, include=FALSE}
+# # Define color palette for max_freq
+# max_freq_colors <- c("5 MAX" = "#4B0082", "10 MAX" = "#FF4500", "15 MAX" = "#A6123A", "30 MAX" = "#26A699", "60 MAX" = "#F2AE2E")
+# pal_3_max_freq <- colorFactor(palette = max_freq_colors, domain = joined_data_sf$max_freq)
+# 
+# # Create weekday map
+# map_weekday <- leaflet() %>%
+#   addProviderTiles(providers$CartoDB.Positron) %>%
+#   addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+#   addPolylines(data = joined_data_sf %>% filter(final_day_type == "Weekday"),
+#                color = ~pal_3_max_freq(max_freq),
+#                weight = 2, opacity = 0.8, 
+#                popup = ~paste0("<b>Segment ID:</b>", sgmntId, "<br>",
+#                                "<b>Start Name:</b> ", start_name, "<br>",
+#                                "<b>End Name:</b> ", end_name, "<br>",
+#                                "<b>Avg Trips/Hour:</b>", avg_trip_hr, "<br>",
+#                                "<b>Maximum Frequency:</b>", max_freq, "<br>",
+#                                "<b>All Routes:</b> ", All_Routes, "<br>",
+#                                "<b>Day Type:</b> ", final_day_type),
+#                group = "Weekday") %>%
+#   addLegend(pal = pal_3_max_freq,
+#             values = joined_data_sf$max_freq,
+#             title = "Max Frequency",
+#             position = "bottomright")
+# 
+# # Create weekend map
+# map_weekend <- leaflet() %>%
+#   addProviderTiles(providers$CartoDB.Positron) %>%
+#   addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+#   addPolylines(data = joined_data_sf %>% filter(final_day_type == "Weekend"),
+#                color = ~pal_3_max_freq(max_freq),
+#                weight = 2, opacity = 0.8, 
+#                popup = ~paste0("<b>Segment ID:</b>", sgmntId, "<br>",
+#                                "<b>Start Name:</b> ", start_name, "<br>",
+#                                "<b>End Name:</b> ", end_name, "<br>",
+#                                "<b>Avg Trips/Hour:</b>", avg_trip_hr, "<br>",
+#                                "<b>Maximum Frequency:</b>", max_freq, "<br>",
+#                                "<b>All Routes:</b> ", All_Routes, "<br>",
+#                                "<b>Day Type:</b> ", final_day_type),
+#                group = "Weekend") %>%
+#   addLegend(pal = pal_3_max_freq,
+#             values = joined_data_sf$max_freq,
+#             title = "Max Frequency",
+#             position = "bottomright")
+# 
+# # Export weekday map as PNG
+# saveWidget(map_weekday, "map_weekday.html", selfcontained = TRUE)
+# webshot("map_weekday.html", "map_weekday.png", vwidth = 1200, vheight = 800)
+# 
+# # Export weekend map as PNG
+# saveWidget(map_weekend, "map_weekend.html", selfcontained = TRUE)
+# webshot("map_weekend.html", "map_weekend.png", vwidth = 1200, vheight = 800)
+# 
+# # Optional: Remove the HTML files after screenshots captured
+# file.remove("map_weekday.html")
+# file.remove("map_weekend.html")
+```
+
+
+#### 3.2.2 Summary Table of Top 10 Segments by Average Trips Per Hour  
+
+The table below lists the top ten bus stops in terms of hourly average trips in the weekday. The bus stops are ranked based on the highest average number of trips, as follows:  
+  
+1. Market St & 18th St to Market St & 16th St  
+2. Market St & 16th St to Market St & 15th St  
+3. JFK Blvd & 15th St to JFK Blvd & 17th St    
+4. Market St & 19th St to	Market St & 18th  
+5. Market St & 13th St	to Market St & 11th St - MBNS  
+6. Market St & 15th St	to Market St & 13th St  
+7. JFK Blvd & 17th St	JFK Blvd & 18th St  
+8. Market St & 10th St	to Market St & 9th St  
+9. Market St & 11th St - MBNS	to Market St & 10th St  
+10. Market St & 9th St	to Market St & 8th St - MBNS  
+  
+On the other hand, weekend-service trips show a slightly different insight: 
+  
+1. Market St & 18th St	to Market St & 16th St  
+2. Market St & 16th St	to Market St & 15th St  
+3. JFK Blvd & 15th St	to JFK Blvd & 17th St  
+4. Market St & 13th St	to Market St & 11th St - MBNS  
+5. Market St & 15th St	to Market St & 13th St  
+6. Market St & 19th St	to Market St & 18th  
+7. Market St & 10th St	to Market St & 9th St  
+8. Market St & 11th St - MBNS	to Market St & 10th  
+9. Market St & 9th St	to Market St & 8th St - MBNS  
+10. Market St & 8th St - MBNS	Market St & 7th St    
+
+
+```{r top 10 segment table, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 10 stops for 'mode' == 'bus' on the weekday
+top_segments_hr_weekday <- joined_data_sf %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  arrange(desc(avg_trip_hr)) %>%
+  select(sgmntId,	start_name,	end_name,	avg_trip_hr, All_Routes)%>%
+  slice_head(n = 10)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_hr_weekday, "html", booktabs = TRUE, 
+      caption = "Top 10 Segments by Average Trips Per Hour on the Weekday") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em") 
+
+# Filter and select the top 10 stops for 'mode' == 'bus' on the weekend
+top_segments_hr_weekend <- joined_data_sf %>%
+  filter(final_day_type == "Weekend", mode %in% c("Bus", "Trolleybus")) %>%
+  arrange(desc(avg_trip_hr)) %>%
+  select(sgmntId,	start_name,	end_name,	avg_trip_hr, All_Routes)%>%
+  slice_head(n = 10)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_hr_weekend, "html", booktabs = TRUE, 
+      caption = "Top 10 Segments by Average Trips Per Hour on the Weekend") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em") 
+```
+
+
+```{r top 5 segments table, message=FALSE, warning=FALSE, cache=TRUE}
+# Function to get top 5 segments per category
+get_top_segments_per_category <- function(data, n = 5) {
+  data %>%
+    group_by(dominant_county) %>%
+    arrange(desc(avg_trip_hr)) %>%
+    select(sgmntId, start_name, end_name, avg_trip_hr, max_freq, All_Routes, dominant_county) %>%
+    slice_head(n = n) %>%
+    ungroup()
+}
+
+# Exclude PHILADELPHIA-Center_City and filter for Weekday data
+dat_filtered_weekday <- joined_data_sf %>%
+  filter(final_day_type == "Weekday", dominant_county != "PHILADELPHIA-Center_City", mode %in% c("Bus", "Trolleybus"))
+
+# Get top 5 segments per category for Weekday
+top_segments_hr_weekday <- get_top_segments_per_category(dat_filtered_weekday, n = 5)
+
+# Create the table for Weekday
+kable(top_segments_hr_weekday, "html", booktabs = TRUE, caption = "Top 5 Segments by Average Trips Per Hour on the Weekday") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(6, width = "15em") 
+
+# Exclude PHILADELPHIA-Center_City and filter for Weekend data
+dat_filtered_weekend <- joined_data_sf %>%
+  filter(final_day_type == "Weekend", dominant_county != "PHILADELPHIA-Center_City", mode %in% c("Bus", "Trolleybus"))
+
+# Get top 5 segments per category for Weekend
+top_segments_hr_weekend <- get_top_segments_per_category(dat_filtered_weekend, n = 5)
+
+# Create the table for Weekend
+kable(top_segments_hr_weekend, "html", booktabs = TRUE, caption = "Top 5 Segments by Average Trips Per Hour on the Weekend") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(6, width = "15em") 
+
+```
+
+```{r top 10 trolley segments table, message=FALSE, warning=FALSE, cache=TRUE}
+# Function to get top 5 segments per category
+get_top_segments_per_category <- function(data, n = 10) {
+  data %>%
+    group_by(dominant_county) %>%
+    arrange(desc(avg_trip_hr)) %>%
+    select(sgmntId, start_name, end_name, avg_trip_hr, max_freq, mode, All_Routes, dominant_county) %>%
+    slice_head(n = n) %>%
+    ungroup()
+}
+
+# Exclude PHILADELPHIA-Center_City and filter for Weekday data
+dat_filtered_weekday <- joined_data_sf %>%
+  filter(final_day_type == "Weekday", dominant_county != "PHILADELPHIA-Center_City")
+
+dat_filtered_weekday_trolley <- dat_filtered_weekday %>%
+  filter(mode == "Trolley")
+
+# Get top 5 segments per category for Weekday
+top_segments_hr_weekday_trolley <- get_top_segments_per_category(dat_filtered_weekday_trolley, n = 10)
+
+# Create the table for Weekday
+kable(top_segments_hr_weekday_trolley, "html", booktabs = TRUE, caption = "Top 5 Segments by Average Trips Per Hour on the Weekday") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(6, width = "15em") 
+```
+
+
+```{r top 5 segments table export, eval=FALSE, include=FALSE}
+# # Create the table for Weekday
+# top_segments_table_weekday <- kable(top_segments_hr_weekday, "html", booktabs = TRUE, caption = "Top 5 Segments by Average Trips Per Hour on the Weekday") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+#   column_spec(1, bold = TRUE, color = "blue")
+# 
+# # Save the top segments table for weekday as HTML
+# save_kable(top_segments_table_weekday, file = "top_segments_weekday.html")
+# 
+# # Convert the HTML to PNG
+# webshot("top_segments_weekday.html", file = "top_segments_weekday.png")
+# 
+# # Create the table for Weekend
+# top_segments_table_weekend <- kable(top_segments_hr_weekend, "html", booktabs = TRUE, caption = "Top 5 Segments by Average Trips Per Hour on the Weekend") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+#   column_spec(1, bold = TRUE, color = "blue")
+# 
+# # Save the top segments table for weekend as HTML
+# save_kable(top_segments_table_weekend, file = "top_segments_weekend.html")
+# 
+# # Convert the HTML to PNG
+# webshot("top_segments_weekend.html", file = "top_segments_weekend.png")
+```
+
+
+### 3.3 Average Buses Per Service Period at Each Segment  
+
+#### 3.3.1 Distibution Maps
+
+The following map shows the **average buses per service period at segment level** for the weekday service.  
+
+```{r average bus period segment plot, message=FALSE, warning=FALSE, cache=FALSE}
+# pal_4 <- colorNumeric(palette = viridisLite::viridis(256, option = "C"), domain = joined_data_sgmnt_sf$avg_trip_hr)
+
+pal_4 <- colorNumeric(palette = bus_revolution_palette(length(unique(joined_data_sgmnt_sf$avg_trip_hr))),
+                                   domain = joined_data_sgmnt_sf$avg_trip_hr)
+
+# Define the desired order for peak categories
+peak_order <- c("Owl", "Early Morning", "AM Peak", "Mid Day", "PM Peak", "Evening", "Late Night")
+
+# Initialize the leaflet map
+o <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE)
+
+# Add markers for each combination of final_day_type and peak_category
+for (day_type in unique(joined_data_sgmnt_sf$final_day_type)) {
+  for (peak in unique(joined_data_sgmnt_sf$peak_category)) {
+    filtered_data_sgmnt <- joined_data_sgmnt_sf %>%
+      filter(final_day_type == day_type, peak_category == peak, mode %in% c("Bus", "Trolleybus"))
+    
+    layer_name <- paste(day_type, peak, sep = "_")
+    
+    # Add layers for each day type
+    o <- o %>%
+      addPolylines(data = filtered_data_sgmnt,
+                   color = ~pal_4(avg_trip_hr),
+                   weight = 2, opacity = 0.8, 
+                   popup = ~paste0("<b>Segment ID:</b> ", sgmntId, "<br>",
+                                   "<b>Start Name:</b> ", start_name, "<br>",
+                                   "<b>End Name:</b> ", end_name, "<br>",
+                                   "<b>Avg Trips/Hour:</b> ", avg_trip_hr, "<br>",
+                                   "<b>All Routes:</b> ", All_Routes, "<br>",
+                                   "<b>Day Type:</b> ", final_day_type, "<br>",
+                                   "<b>Peak Category:</b> ", peak_category),
+                   group = layer_name)
+  }
+}
+
+# Generate the list for overlayGroups with the desired order
+overlay_groups <- expand.grid(final_day_type = c("Weekday", "Weekend"), peak_category = peak_order) %>%
+  mutate(group_name = paste(final_day_type, peak_category, sep = "_")) %>%
+  pull(group_name)
+
+# Add legend and layers control
+o <- o %>%
+  addLegend(pal = pal_4,
+            values = joined_data_sgmnt_sf$avg_trip_hr,
+            title = "Avg Trips/Hr",
+            position = "bottomleft") %>%
+  addLayersControl(
+    overlayGroups = overlay_groups,
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(overlay_groups[overlay_groups != "Weekday_Owl"])
+
+# Print the map
+o
+```
+
+The following map shows the **average buses based on maximum frequency at segment level** for the weekday service.
+
+```{r average bus period segment maxfreq, message=FALSE, warning=FALSE, cache=FALSE}
+# Ensure max_freq is a factor with levels matching the colors
+joined_data_sgmnt_sf$max_freq <- factor(joined_data_sgmnt_sf$max_freq, levels = c("5 MAX", "10 MAX", "15 MAX", "30 MAX", "60 MAX"))
+
+# Define the color palette for max_freq
+max_freq_colors <- c("5 MAX" = "#4B0082", "10 MAX" = "#FF4500", "15 MAX" = "#A6123A", "30 MAX" = "#26A699", "60 MAX" = "#F2AE2E")
+pal_4_max_freq <- colorFactor(palette = max_freq_colors, domain = joined_data_sgmnt_sf$max_freq)
+
+# Initialize the leaflet map
+o_max_freq <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE)
+
+# Add markers for each combination of final_day_type and peak_category
+for (day_type in unique(joined_data_sgmnt_sf$final_day_type)) {
+  for (peak in unique(joined_data_sgmnt_sf$peak_category)) {
+    filtered_data_sgmnt <- joined_data_sgmnt_sf %>%
+      filter(final_day_type == day_type, peak_category == peak)
+    
+    layer_name <- paste(day_type, peak, sep = "_")
+    
+    # Add layers for each day type
+    o_max_freq <- o_max_freq %>%
+      addPolylines(data = filtered_data_sgmnt,
+                   color = ~pal_4_max_freq(max_freq),
+                   weight = 2, opacity = 0.8, 
+                   popup = ~paste0("<b>Segment ID:</b> ", sgmntId, "<br>",
+                                   "<b>Start Name:</b> ", start_name, "<br>",
+                                   "<b>End Name:</b> ", end_name, "<br>",
+                                   "<b>Avg Trips/Hour:</b> ", avg_trip_hr, "<br>",
+                                   "<b>Maximum Frequency:</b>", max_freq, "<br>",
+                                   "<b>Mode:</b> ", mode, "<br>",
+                                   "<b>All Routes:</b> ", All_Routes, "<br>",
+                                   "<b>Day Type:</b> ", final_day_type, "<br>",
+                                   "<b>Peak Category:</b> ", peak_category),
+                   group = layer_name)
+  }
+}
+
+# Generate the list for overlayGroups
+overlay_groups <- expand.grid(final_day_type = c("Weekday", "Weekend"), peak_category = peak_order) %>%
+  mutate(group_name = paste(final_day_type, peak_category, sep = "_")) %>%
+  pull(group_name)
+
+# Add legend and layers control
+o_max_freq <- o_max_freq %>%
+  addLegend(pal = pal_4_max_freq,
+            values = joined_data_sgmnt_sf$max_freq,
+            title = "Maximum Frequency",
+            position = "bottomleft") %>%
+  addLayersControl(
+    overlayGroups = overlay_groups,
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(overlay_groups[overlay_groups != "Weekday_Owl"])
+
+# Print the map
+o_max_freq
+```
+
+```{r average bus period segment maxfreq export, eval=FALSE, include=FALSE}
+# # Define the color palette for max_freq
+# max_freq_colors <- c("5 MAX" = "#4B0082", "10 MAX" = "#FF4500", "15 MAX" = "#A6123A", "30 MAX" = "#26A699", "60 MAX" = "#F2AE2E")
+# pal_4_max_freq <- colorFactor(palette = max_freq_colors, domain = joined_data_sgmnt_sf$max_freq)
+# 
+# # Filter for weekday data only
+# weekday_data_sgmnt <- joined_data_sgmnt_sf %>%
+#   filter(final_day_type == "Weekday")
+# 
+# # Function to create and save map for each service period
+# save_map_as_png <- function(peak) {
+#   # Filter data for the specific peak category
+#   filtered_data_sgmnt <- weekday_data_sgmnt %>%
+#     filter(peak_category == peak)
+# 
+#   # Initialize the leaflet map
+#   o_max_freq <- leaflet() %>%
+#     addProviderTiles(providers$CartoDB.Positron) %>%
+#     addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+#     addPolylines(data = filtered_data_sgmnt,
+#                  color = ~pal_4_max_freq(max_freq),
+#                  weight = 2, opacity = 0.8,
+#                  popup = ~paste0("<b>Segment ID:</b> ", sgmntId, "<br>",
+#                                  "<b>Start Name:</b> ", start_name, "<br>",
+#                                  "<b>End Name:</b> ", end_name, "<br>",
+#                                  "<b>Avg Trips/Hour:</b> ", avg_trip_hr, "<br>",
+#                                  "<b>Maximum Frequency:</b>", max_freq, "<br>",
+#                                  "<b>Mode:</b> ", mode, "<br>",
+#                                  "<b>All Routes:</b> ", All_Routes, "<br>",
+#                                  "<b>Day Type:</b> ", final_day_type, "<br>",
+#                                  "<b>Peak Category:</b> ", peak_category),
+#                  group = peak) %>%
+#     addLegend(pal = pal_4_max_freq,
+#               values = filtered_data_sgmnt$max_freq,
+#               title = "Maximum Frequency",
+#               position = "bottomleft") %>%
+#     addLayersControl(
+#       overlayGroups = peak,
+#       options = layersControlOptions(collapsed = FALSE)
+#     )
+# 
+#   # Save the map as an HTML file
+#   file_name_html <- paste0("weekday_map_", peak, ".html")
+#   saveWidget(o_max_freq, file = file_name_html, selfcontained = FALSE)
+# 
+#   # Convert the HTML map to a PNG file
+#   file_name_png <- paste0("weekday_map_", peak, ".png")
+#   webshot(file_name_html, file = file_name_png, vwidth = 1200, vheight = 800)
+# }
+# 
+# # Loop through each peak category to create and save maps
+# for (peak in unique(weekday_data_sgmnt$peak_category)) {
+#   save_map_as_png(peak)
+# }
+```
+
+```{r average bus 56 segment maxfreq export, eval=FALSE, include=FALSE}
+# Initialize the leaflet map
+route56_max_freq <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE)
+
+# Add markers for each combination of final_day_type and peak_category
+for (day_type in unique(joined_data_sgmnt_sf$final_day_type)) {
+  for (peak in unique(joined_data_sgmnt_sf$peak_category)) {
+    filtered_data_sgmnt <- joined_data_sgmnt_sf %>%
+      filter(final_day_type == day_type, 
+             peak_category == peak, 
+             str_detect(All_Routes, "56")) # Filter for any entry containing "56" <- Change this number for other routes
+    
+    layer_name <- paste(day_type, peak, sep = "_")
+    
+    # Add layers for each day type
+    route56_max_freq <- route56_max_freq %>%
+      addPolylines(data = filtered_data_sgmnt,
+                   color = ~pal_4_max_freq(max_freq),
+                   weight = 2, opacity = 0.8, 
+                   popup = ~paste0("<b>Segment ID:</b> ", sgmntId, "<br>",
+                                   "<b>Start Name:</b> ", start_name, "<br>",
+                                   "<b>End Name:</b> ", end_name, "<br>",
+                                   "<b>Avg Trips/Hour:</b> ", avg_trip_hr, "<br>",
+                                   "<b>Maximum Frequency:</b> ", max_freq, "<br>",
+                                   "<b>Mode:</b> ", mode, "<br>",
+                                   "<b>All Routes:</b> ", All_Routes, "<br>",
+                                   "<b>Day Type:</b> ", final_day_type, "<br>",
+                                   "<b>Peak Category:</b> ", peak_category),
+                   group = layer_name)
+  }
+}
+
+# Generate the list for overlayGroups
+overlay_groups <- expand.grid(final_day_type = c("Weekday", "Weekend"), peak_category = peak_order) %>%
+  mutate(group_name = paste(final_day_type, peak_category, sep = "_")) %>%
+  pull(group_name)
+
+# Add legend and layers control
+route56_max_freq <- route56_max_freq %>%
+  addLegend(pal = pal_4_max_freq,
+            values = joined_data_sgmnt_sf$max_freq,
+            title = "Maximum Frequency",
+            position = "bottomleft") %>%
+  addLayersControl(
+    overlayGroups = overlay_groups,
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(overlay_groups[overlay_groups != "Weekday_Owl"])
+
+# Print the map
+route56_max_freq
+```
+
+#### 3.3.2 Summary Table of Top 5 Segments per Service Period
+
+##### Owl
+
+The table below lists the top five segments in terms of average trips during the Owl period. The segments are ranked based on the highest average number of trips, as follows:  
+  
+1. Market St & 13th St	to Market St & 11th St - MBNS  
+2. Market St & 15th St	to Market St & 13th St  
+3. Market St & 18th St	to Market St & 16th St   
+4. Broad St & Race St	to Broad St & Vine St - FS  
+5. Broad St & Susquehanna Av	to Broad St & Dauphin St  
+
+```{r segment data wide, message=FALSE, warning=FALSE, cache=TRUE, results='hide'}
+joined_data_sgmnt_wide <- joined_data_sgmnt_sf %>%
+  select(-trip_count) %>%
+  pivot_wider(
+    names_from = peak_category,
+    values_from = avg_trip_hr,
+    names_glue = "{peak_category}_avg", # This will separate the category names and measure names with an underscore
+    values_fill = list(avg_trip_hr = 0)  # Fill NA values with zero
+  )
+```
+
+```{r top 5 segment owl, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops during Owl period
+top_segments_period_owl <- joined_data_sgmnt_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(sgmntId, start_name, end_name, Owl_avg, All_Routes) %>%
+  arrange(desc(Owl_avg)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_period_owl, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Owl Period",
+      align = c('l', rep('l', ncol(top_segments_period_owl) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em")
+
+```
+
+##### Early Morning
+
+The table below lists the top five segments in terms of average trips during the Early Morning period. The segments are ranked based on the highest average number of trips, as follows:  
+  
+1. Market St & 13th St	to Market St & 11th St - MBNS  
+2. Market St & 15th St	to Market St & 13th St  
+3. Market St & 18th St	to Market St & 16th St	  
+4. 23rd St & Venango St Loop	to Hunting Park Av & 22nd St  
+5. Allegheny Av & 34th St	to Allegheny Av & 33rd St  
+
+
+```{r top 5 segment early morning, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops during Early Morning period
+top_segments_period_early_morning <- joined_data_sgmnt_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(sgmntId, start_name, end_name, `Early Morning_avg`, All_Routes) %>%
+  arrange(desc(`Early Morning_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_period_early_morning, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Early Morning Period",
+      align = c('l', rep('l', ncol(top_segments_period_early_morning) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em")
+```
+
+##### AM Peak
+
+The table below lists the top five segments in terms of average trips during the AM Peak period. The segments are ranked based on the highest average number of trips, as follows:  
+  
+1. Market St & 18th St	to Market St & 16th St  
+2. Market St & 16th St	to Market St & 15th St  
+3. JFK Blvd & 15th St	to JFK Blvd & 17th St  
+4. Market St & 19th St	to Market St & 18th St  
+5. JFK Blvd & 17th St	to JFK Blvd & 18th St	
+
+
+```{r top 5 segment am peak, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops during AM Peak period
+top_segments_period_am_peak <- joined_data_sgmnt_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(sgmntId, start_name, end_name, `AM Peak_avg`, All_Routes) %>%
+  arrange(desc(`AM Peak_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_period_am_peak, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at AM Peak Period",
+      align = c('l', rep('l', ncol(top_segments_period_am_peak) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em") 
+```
+
+##### Mid Day
+
+The table below lists the top five segments in terms of average trips during the Mid Day period. The segments are ranked based on the highest average number of trips, as follows:  
+  
+1. Market St & 18th St	to Market St & 16th St  
+2. Market St & 16th St	to Market St & 15th St  
+3. JFK Blvd & 15th St	to JFK Blvd & 17th St  
+4. Market St & 19th St	to Market St & 18th St  
+5. JFK Blvd & 17th St	to JFK Blvd & 18th St	
+
+
+```{r top 5 segment mid day, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops during Mid Day period
+top_segments_period_mid_day <- joined_data_sgmnt_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(sgmntId, start_name, end_name,  `Mid Day_avg`, All_Routes) %>%
+  arrange(desc(`Mid Day_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_period_mid_day, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Mid Day Period",
+      align = c('l', rep('l', ncol(top_segments_period_mid_day) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em") 
+```
+
+##### Peak PM
+
+The table below lists the top five segments in terms of average trips during the PM Peak period. The segments are ranked based on the highest average number of trips, as follows:  
+  
+1. Market St & 18th St	to Market St & 16th St  
+2. Market St & 16th St	to Market St & 15th St  
+3. JFK Blvd & 15th St	to JFK Blvd & 17th St  
+4. Market St & 19th St	to Market St & 18th St  
+5. JFK Blvd & 17th St	to JFK Blvd & 18th St
+
+
+```{r top 5 segment pm peak, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops during PM Peak period
+top_segments_period_pm_peak <- joined_data_sgmnt_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(sgmntId, start_name, end_name, `PM Peak_avg`, All_Routes) %>%
+  arrange(desc(`PM Peak_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_period_pm_peak, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at PM Peak Period",
+      align = c('l', rep('l', ncol(top_segments_period_pm_peak) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em")
+```
+
+##### Evening
+
+The table below lists the top five segments in terms of average trips during the Evening period. The segments are ranked based on the highest average number of trips, as follows:  
+  
+1. 2. Market St & 18th St	to Market St & 16th St  
+2. Market St & 16th St	to Market St & 15th St  
+3. JFK Blvd & 15th St	to JFK Blvd & 17th St  
+4. Market St & 19th St	to Market St & 18th St  
+5. JFK Blvd & 17th St	to JFK Blvd & 18th St  
+
+
+```{r top 5 segment evening, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops during Evening period
+top_segments_period_evening <- joined_data_sgmnt_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(sgmntId, start_name, end_name, Evening_avg, All_Routes) %>%
+  arrange(desc(Evening_avg)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_period_evening, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Evening Period",
+      align = c('l', rep('l', ncol(top_segments_period_evening) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em") 
+```
+
+##### Late Night
+
+The table below lists the top five segments in terms of average trips during the Late Night period. The segments are ranked based on the highest average number of trips, as follows:  
+  
+1. Market St & 18th St	to Market St & 16th St	  
+2. Market St & 16th St	to Market St & 15th St  
+3. JFK Blvd & 15th St	to JFK Blvd & 17th St  
+4. Market St & 19th St	to Market St & 18th St  
+5. Walnut St & 20th St	to Walnut St & 21st St  
+
+
+```{r top 5 segment late night, message=FALSE, warning=FALSE, cache=TRUE}
+# Filter and select the top 5 stops during PM Peak period
+top_segments_period_late_night <- joined_data_sgmnt_wide %>%
+  filter(final_day_type == "Weekday", mode %in% c("Bus", "Trolleybus")) %>%
+  select(sgmntId, start_name, end_name, `Late Night_avg`, All_Routes) %>%
+  arrange(desc(`Late Night_avg`)) %>%
+  slice_head(n = 5)
+
+# Create a table with kable and enhance it with kableExtra
+kable(top_segments_period_late_night, "html", booktabs = TRUE, 
+      caption = "Top 5 Bus Stops by Average Trips at Late Night Period",
+      align = c('l', rep('l', ncol(top_segments_period_late_night) - 1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
+  column_spec(2, width = "15em") %>%
+  column_spec(3, width = "15em") %>%
+  column_spec(4, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") %>%
+  column_spec(5, width = "15em") 
+```
