@@ -56,6 +56,7 @@ Using the latest SEPTA General Transit Feed Specification (GTFS) data[^1], it re
 
 [^1]: [SEPTA GTFS](https://www3.septa.org/developer/gtfs_public.zip)
 
+
 ```{r import gtfs, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
 # Import GTFS data
 stops <- read.csv("stops.txt", header = TRUE, sep = ",")
@@ -75,13 +76,7 @@ swiftly <- st_read("SwiftlyShapes/geoJSONs/SEPTASurface_HighResSpeed_v2.json")
 
 ```
 
-### 1.2 Exploratory Data Analysis
-
-#### 1.2.1 Total Trip by Mode
-
-The chart below illustrates the total number of trips recorded by each mode of transportation. With over 2 million observations, 88% of the trips were made by bus, with the remaining trips taken by trolley, trolley bus, and metro. It's important to note that these trip counts differ from ridership numbers, which are based on the number of passengers. Here, trips are counted by the number of stops each mode makes; hence, a single trip can account for multiple passengers depending on the vehicle's capacity and utilization.
-
-This study focuses primarily on bus trips, which constitute the majority of the observations. For this analysis, trolley buses are also categorized under bus trips, which collectively account for over 90% of the trips. The subsequent sections will therefore focus on the bus trips.  
+SEPTA's data reveals that a staggering 80% of its trips are made by bus, showcasing the critical role of bus transit in Philadelphia’s transportation network. This statistic underlines the heavy reliance on buses across the city, not just in suburban areas. 
 
 ```{r total trip, message=FALSE, warning=FALSE, cache=TRUE}
 # Join stop_times and trips, from now on dat will be our main data set
