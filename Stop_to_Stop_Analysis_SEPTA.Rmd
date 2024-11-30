@@ -528,4 +528,91 @@ m_avg_trip_hr
 
 ```
 
-Midge’s daily challenge with inconsistent suburban bus service reflects broader transit inequities between urban and suburban settings. This disparity is exemplified by the operational inefficiencies of suburban routes, highlighted by data indicating these buses frequently fall within the lowest 15th percentile for service performance. This low percentile indicates prolonged wait times and unreliable schedules—factors contributing to higher operational costs and reduced reliability compared to more efficient urban 
+Midge’s daily challenge with inconsistent suburban bus service reflects broader transit inequities between urban and suburban settings. This disparity is exemplified by the operational inefficiencies of suburban routes, highlighted by data indicating these buses frequently fall within the lowest 15th percentile for service performance. This low percentile indicates prolonged wait times and unreliable schedules—factors contributing to higher operational costs and reduced reliability compared to more efficient urban counterparts.
+
+<span style="color: #655BA6;">Suburban buses</span>, like the routes Midge uses, often suffer due to lower ridership densities and less optimized route planning, as reflected in the significant number of suburban routes like Routes 118, 129, and 90 underperforming in the 15th percentile. These routes' inefficiencies starkly contrast with the robust transit systems in urban areas, underscoring a critical gap in transit equity and efficiency that demands innovative solutions.
+
+```{r scatterplot, message=FALSE, warning=FALSE, cache=FALSE}
+
+route_evaluation <- read.csv("data/route_evaluation_report_2019.csv", sep = ";")
+
+# Convert Cost.per.Passenger and Passengers.per.Revenue.Hour into proper numeric columns
+route_evaluation$Cost.per.Passenger <- as.numeric(gsub("[$,]", "", route_evaluation$Cost.per.Passenger))
+route_evaluation$Passengers.per.Revenue.Hour <- as.numeric(route_evaluation$Passengers.per.Revenue.Hour)
+
+# Calculate 15th percentile for Passengers and 85th percentile for Cost (due to reversed axis)
+passenger_15th <- quantile(route_evaluation$Passengers.per.Revenue.Hour, probs = 0.15, na.rm = TRUE)
+cost_85th <- quantile(route_evaluation$Cost.per.Passenger, probs = 0.85, na.rm = TRUE)
+
+# Define color palette for the types of buses
+route_colors <- c("City Bus" = "#A6123A", "Suburban Bus" = "#655BA6")
+pal <- colorFactor(route_colors, domain = unique(route_evaluation$Type))
+
+# Create the ggplot
+p <- ggplot(route_evaluation, aes(x = Passengers.per.Revenue.Hour, y = Cost.per.Passenger, color = Type, text = paste("Route:", Route, "<br>Passengers per Revenue Hour:", Passengers.per.Revenue.Hour, "<br>Cost per Passenger:", Cost.per.Passenger, "<br>Type:", Type))) +
+  annotate("rect", xmin = 0, xmax = passenger_15th, ymin = max(route_evaluation$Cost.per.Passenger), ymax = cost_85th, fill = "lightcoral", alpha = 0.2) +
+  geom_vline(xintercept = passenger_15th, linetype = "dashed", color = "grey") +
+  geom_hline(yintercept = cost_85th, linetype = "dashed", color = "grey") +
+  geom_point() +
+  labs(title = "Performance of SEPTA City Bus and Suburban Bus",
+       x = "Passengers per Revenue Hour",
+       y = "Cost per Passenger",
+       caption = "Source: SEPTA FY 2019 Report") +
+  scale_color_manual(values = route_colors) +
+  scale_y_reverse(breaks = seq(0, max(route_evaluation$Cost.per.Passenger, na.rm = TRUE), by = 1),
+                  labels = dollar_format(prefix = "$", suffix = "", accuracy = 0.01)) +
+  scale_x_continuous(breaks = seq(0, max(route_evaluation$Passengers.per.Revenue.Hour, na.rm = TRUE), by = 10)) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  annotate("text", x = passenger_15th / 2, y = 6.5, label = "15th percentile", size = 3, color = "black", alpha = 0.5)
+
+# Convert to plotly for an interactive plot with detailed hover information
+p_plotly <- ggplotly(p, tooltip = "text")
+
+# Display the interactive plot
+p_plotly
+
+```
+
+Although microtransit has been proposed as an alternative to address these inefficiencies by offering more adaptable and potentially efficient services in lower-density areas, its effectiveness remains questionable. For example, AC Transit's experiment in Oakland to replace fixed routes with microtransit resulted in a cost per passenger that more than doubled, highlighting the challenges of implementing such services effectively.[^9]
+
+This data illustrates that while microtransit is often touted as a modern solution for declining ridership, it generally does not perform as efficiently as traditional fixed-route services. The core efficiency of fixed-route transit comes from its ability to consolidate riders along a predictable path, minimizing deviations and ensuring consistent travel times. In contrast, microtransit's on-demand nature can lead to significant inefficiencies, with routes constantly changing to accommodate individual pickup requests, leading to increased travel times and operational costs.
+
+Given these challenges, it might be more prudent to explore other alternatives, such as deploying smaller, fixed-route minibusses during peak hours to enhance connectivity and manage crowding more effectively. This approach could leverage the lower operational costs of smaller vehicles while maintaining the structured efficiency of fixed-route transit, potentially offering a more sustainable solution to the suburban transit woes that Midge and countless others face daily.
+
+[^9]: [Urgo 2019](https://www.apta.com/wp-content/uploads/Conferences_Meetings_Events/Presentations/2018-Sustainability/Urgo-John.pdf#page=24)
+
+```{r static scatterplot, eval=FALSE, include=FALSE}
+# # Assuming passenger_15th and cost_85th are your calculated 15th percentile values
+# ggplot(route_evaluation, aes(x = Passengers.per.Revenue.Hour, y = Cost.per.Passenger, color = Type)) +
+#   # Add a rectangle and text annotation for the 15th percentile
+#   annotate("rect", xmin = 0, xmax = passenger_15th, ymin = max(route_evaluation$Cost.per.Passenger), ymax = cost_85th,
+#            fill = "red", alpha = 0.2) +
+#   geom_point() +
+#   labs(title = "Performance of SEPTA City Bus and Suburban Bus",
+#        x = "Passengers per Revenue Hour",
+#        y = "Cost per Passenger") +
+#   scale_color_brewer(palette = "Set1") +
+#   scale_y_reverse(breaks = seq(0, max(route_evaluation$Cost.per.Passenger, na.rm = TRUE), by = 1),
+#                   labels = dollar_format(prefix = "$", suffix = "", accuracy = 0.01)) +
+#   scale_x_continuous(breaks = seq(0, max(route_evaluation$Passengers.per.Revenue.Hour, na.rm = TRUE), by = 10)) +
+#   theme_minimal() +
+#   geom_vline(xintercept = passenger_15th, linetype = "dashed", color = "grey") +
+#   geom_hline(yintercept = cost_85th, linetype = "dashed", color = "grey") +
+#   theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) +
+#   annotate("text", x = passenger_15th / 2, y = 6.5, label = "15th percentile",
+#            size = 3, color = "black")
+```
+
+
+### Impact and Innovation: Enhancing Suburban Bus Services
+
+While the raw data illuminates the service disparities, the true depth of this issue is best captured through the lived experiences of suburban commuters like Midge. Personal stories reveal the broader human impact: missed opportunities, prolonged workdays, and diminished family life due to infrequent bus services. This qualitative insight paints a vivid picture of the daily challenges and underscores the urgency for targeted improvements.
+
+SEPTA's ongoing "Bus Revolution" project aims to modernize and enhance bus services, promising updated routes and improved frequencies that haven't been revised since the 1960s. While the initiative seeks to reduce headways to a maximum of 30 minutes even in the most remote suburban areas, it has faced delays and criticism, particularly concerning its potential to disproportionately impact low-income neighborhoods. This tension highlights the complex interplay between improving service efficiency and addressing community concerns of gentrification.
+
+As we conclude our exploration of suburban bus transit disparities in Philadelphia, the compelling narratives of daily commuters, underpinned by robust SEPTA data, paint a clear picture of the challenges and the urgent need for systemic improvements. The "Bus Revolution" project, while a promising step toward enhancing bus frequencies and updating decades-old routes, also highlights the delicate balance required to improve service efficiency without exacerbating social inequities.
+
+Embracing innovative solutions and fostering community engagement in transit planning are crucial. By committing to both technological upgrades and equitable service distribution, SEPTA can ensure that every commuter, regardless of where they live, has reliable and timely access to public transit. This not only improves individual daily experiences but also supports broader goals of economic mobility and sustainable urban development.
+
+As stakeholders, we are called upon to support these initiatives, advocate for transparent and inclusive planning processes, and ensure that the voices of all commuters, especially those most affected like Midge, are heard and addressed in the pursuit of a truly connected and equitable transit system.
