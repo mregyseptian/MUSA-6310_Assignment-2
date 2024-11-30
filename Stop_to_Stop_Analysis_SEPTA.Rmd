@@ -1,7 +1,7 @@
 ---
 title: "Waiting for Change: The Urgent Need for Equitable Bus Services in Suburban Philadelphia"
 author: "Regy Septian"
-date: "2024-09-24"
+date: "2024-11-30"
 output: 
   html_document:
     toc: true
@@ -35,6 +35,8 @@ library(scales)
 library(shiny)
 library(webshot2)
 library(magick)
+library(plotly)
+library(readr)
 
 # Define the color codes
 bus_revolution_colors <- c("#A6123A", "#655BA6", "#26A699", "#F2AE2E", "#F2E5D5")
@@ -44,18 +46,35 @@ bus_revolution_palette <- function(n) {
   colorRampPalette(bus_revolution_colors)(n)
 }
 
-workdir <- "~/GitHub/MUSA-6310_Assignment-2" # Change the directory
+workdir <- "~/OneDrive - PennO365/03_UNIVERSITY_OF_PENNSYLVANIA-MCP_2025/04_FALL_24/03_MUSA_6951_Communication_in_Urban_Spatial_Analytics/MUSA-6310_Assignment-2/MUSA-6310_Assignment-2" # Change the directory
 setwd(workdir)
 ```
+
 ### A Commuter's Challenge in Suburban Philadelphia  
 
-Every morning, Midge, a recent graduate working in downtown Philadelphia, starts her day battling the limitations of suburban bus transit. With services far less frequent than those in urban centers, her story illustrates the broader struggles faced by many suburban commuters, dependent on a system that doesn't meet their needs.  
+Every morning, Midge, a healthcare worker, embarks on her daily journey from the quiet streets of Pottstown[^1] in Montgomery County to the bustling corridors of the Hospital of the University of Pennsylvania in Philadelphia. Her commute is more than just a physical journey—it’s a daily ordeal, wrestling with the infrequent and unreliable bus service that connects the suburban sprawl to the urban core. On a good day, Midge waits 30 minutes for Bus 93; on a bad day, the wait can exceed an hour. She must then transfer to the Norristown High Speed Line, extending her total morning commute to over 2.5 hours—five times longer than Philadelphia's average commute time.[^2] This inconsistency isn't just a personal inconvenience; it's a stark reflection of the broader issues of transit inequities that plague many in the suburbs, where buses are few and far between despite the pressing need.
 
-### Urban Efficiency vs. Suburban Scarcity  
+Midge's story is not unique in Greater Philadelphia—a region where 58.2 percent of public transit users are women and 66.4 percent are people of color. These individuals predominantly populate essential sectors like healthcare, education, and social assistance which employs 25.6 percent of suburban county workers who depend on public transportation. Despite playing critical roles in their communities, these workers earn median annual earnings approximately $7,673 below the regional average. This economic disparity is exacerbated by the transit challenges they face, where the gap in accessibility and frequency of service widens the divide between different socioeconomic groups. Additionally, a significant portion of the workforce, about 35%, lives below the poverty line, heavily relying on this patchwork public transport system that struggles to meet their daily needs.[^3] 
 
-Using the latest SEPTA General Transit Feed Specification (GTFS) data[^1], it reveals that a staggering 80% of SEPTA's trips are made by bus, showcasing the critical role of bus transit in Philadelphia’s transportation network. This statistic underlines the heavy reliance on buses across the city, not just in suburban areas. 
+[^1]: [WHYY: Tracing Montco’s decades-long shift from GOP stronghold to boon for Biden](https://whyy.org/articles/tracing-montcos-decades-long-shift-from-gop-stronghold-to-boon-for-biden/)
+[^2]: [The Philadelphia Inquirer: Philly commutes are getting slightly quicker, but they’re among the longest in the U.S.](https://www.inquirer.com/transportation/philadelphia-commute-time-longest-transit-20241010.html#loaded)
+[^3]: [Economy League: Greater Philadelphia’s Public Transportation and COVID-19 – PART 2](https://www.economyleague.org/resources/greater-philadelphias-public-transportation-and-covid-19-part-2#)
 
-[^1]: [SEPTA GTFS](https://www3.septa.org/developer/gtfs_public.zip)
+### The Importance of Transit for Suburban Communities  
+
+Midge’s daily commute sheds light on a more significant issue: the critical role of public transportation in providing access to essential services and economic opportunities, especially in suburban communities. Studies highlight a robust negative correlation between unemployment rates and proximity to transit access. In New York City, neighborhoods with some but limited transit access experienced a significantly higher unemployment rate (12.6%) compared to areas with robust transit options (8.1%). [^4] This lack of transit access limits physical and economic mobility, contributing to income inequality and higher public assistance dependency.
+
+Moreover, reliable public transportation is pivotal for healthcare access. The National Health Interview Survey (2002) estimated that 3.6 million people miss non-emergency medical appointments annually due to transportation issues. This issue disproportionately affects communities of color, who rely more heavily on public transportation compared to white populations. [^5] Midge’s commute is not just a matter of convenience; it’s about accessing crucial healthcare services that manage chronic conditions and provide necessary treatments.
+
+Transportation also plays a fundamental role in educational access. The "geography of opportunity" significantly shapes educational outcomes through accessible transportation, enabling children and young people to reach schools and participate in extracurricular activities.[^6] A study in Minneapolis found that high school students with access to an unlimited bus and rail pass attended school more regularly and achieved higher GPAs by 0.23 than students without a pass, [^7] highlighting the importance of reliable transit in educational attainment.
+
+Using the latest SEPTA General Transit Feed Specification (GTFS) data[^8], it reveals that a staggering 80% of SEPTA's trips are made by bus, showcasing the critical role of bus transit in Philadelphia’s transportation network. This statistic underlines the heavy reliance on buses across the city, not just in suburban areas. 
+
+[^4]: [Kaufman and colleagues 2015](https://wagner.nyu.edu/files/faculty/publications/JobAccessNov2015.pdf)
+[^5]: [Wallace et al. 2015](https://journals.sagepub.com/doi/abs/10.1177/0361198105192400110)
+[^6]: [Vincent et al. 2014](https://eric.ed.gov/?id=ED558542)
+[^7]: [Fan and Das 2015](https://conservancy.umn.edu/items/5d998968-aafe-4bf0-92d8-e5da5732f4f7)
+[^8]: [SEPTA GTFS](https://www3.septa.org/developer/gtfs_public.zip)
 
 
 ```{r import gtfs, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
@@ -92,25 +111,47 @@ dat_trip_by_mode <- dat %>%
          mode_share = round(mode_count/sum(mode_count)*100, digits = 2)) %>%
   ungroup() 
   
-# Plot mode share using ggplot2 and the custom palette
+# # Plot mode share using ggplot2 and the custom palette
 ggplot(dat_trip_by_mode, aes(x = mode, y = mode_share, fill = mode)) +
   geom_bar(stat = "identity", width = 0.75) +
   scale_fill_manual(values = bus_revolution_palette(length(unique(dat_trip_by_mode$mode)))) +
-  geom_text(aes(label = paste0(mode_share, "% (", mode_count, " trips)")), 
+  geom_text(aes(label = paste0(mode_share, "% (", mode_count, " trips)")),
             vjust = -0.5, color = "black", size = 2.5) +
   labs(title = "Mode Share by Transit Type",
        x = "Mode",
        y = "Mode Share (%)",
-       fill = "Mode") +
+       fill = "Mode",
+       caption = "Source: SEPTA GTFS Data 2024") +
   theme_minimal() +
   theme(legend.position = "right",
         plot.title = element_text(hjust = 0.5))
-
-# total trip bus & trolley bus 1.980.505, total observations 2.026.677
+# 
+# # total trip bus & trolley bus 1.980.505, total observations 2.026.677
+# 
+# ggplot() +
+#   # Add service period background rectangles with reduced alpha for subtlety
+#   geom_rect(data = service_periods, aes(xmin = start_hour, xmax = end_hour, ymin = 0, ymax = max(hourly_trips$number_of_trips), fill = peak_category), alpha = 0.2) +
+#   # Add the line plot for weekday trips with adjusted point sizes
+#   geom_line(data = hourly_trips %>% filter(final_day_type == "Weekday"), aes(x = hour, y = number_of_trips), color = "#F2AE2E", size = 1) +
+#   geom_point(data = hourly_trips %>% filter(final_day_type == "Weekday"), aes(x = hour, y = number_of_trips), color = "#26A699", size = 3) +
+#   # Add the line plot for weekend trips with a new color for better differentiation
+#   geom_line(data = hourly_trips %>% filter(final_day_type == "Weekend"), aes(x = hour, y = number_of_trips), color = "#0072B2", size = 1) +
+#   geom_point(data = hourly_trips %>% filter(final_day_type == "Weekend"), aes(x = hour, y = number_of_trips), color = "#D55E00", size = 3) +
+#   # Define scales and labels with appropriate adjustments
+#   scale_x_continuous(breaks = 0:23) +
+#   scale_y_continuous(labels = scales::comma) +
+#   scale_fill_manual(values = service_period_colors) +
+#   scale_color_manual(values = c("Weekday" = "#F2AE2E", "Weekend" = "#0072B2")) +
+#   labs(title = "Number of Trips by Hour with Service Periods",
+#        x = "Hour of Day",
+#        y = "Number of Trips",
+#        fill = "Service Period",
+#        color = "Day Type") +
+#   theme_minimal() +
+#   theme(legend.position = "bottom",
+#         plot.title = element_text(hjust = 0.5))
 ```
 
-The data also highlights distinct patterns in ridership, with bus usage peaking during morning (6-9AM) and evening (3-6PM) rush hours on weekdays. This contrasts with weekends, where the pattern flattens, indicating a more even distribution of trips throughout the day.
-  
 ```{r peak time, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
 # CREATE LINE GRAPH OF TRIPS BY SERVICE PERIODS
 
@@ -213,6 +254,9 @@ calendar_joined <- calendar_dates %>%
 dat <- dat %>%
   left_join(calendar_joined, by = "service_id")
 
+```
+
+```{r calendar, eval=FALSE, include=FALSE}
 dat_service_type <- dat %>%
   filter(mode %in% c("Bus", "Trolleybus", "Trolley")) %>%
   group_by(final_day_type)%>%
@@ -239,34 +283,33 @@ service_period_colors <- c(
   "Late Night" = "#A4C2F4"
 )
 
-# Plot the combined graph
-ggplot() +
-  # Add service period background rectangles
-  geom_rect(data = service_periods, aes(xmin = start_hour, xmax = end_hour, ymin = 0, ymax = max(hourly_trips$number_of_trips), fill = peak_category), alpha = 0.3) +
-  # Add the line plot for weekday trips
-  geom_line(data = hourly_trips %>% filter(final_day_type == "Weekday"), aes(x = hour, y = number_of_trips), color = "#F2AE2E", size = 1) +
-  geom_point(data = hourly_trips %>% filter(final_day_type == "Weekday"), aes(x = hour, y = number_of_trips), color = "#26A699", size = 2) +
-  # Add the line plot for weekend trips
-  geom_line(data = hourly_trips %>% filter(final_day_type == "Weekend"), aes(x = hour, y = number_of_trips), color = "#A6123A", size = 1) +
-  geom_point(data = hourly_trips %>% filter(final_day_type == "Weekend"), aes(x = hour, y = number_of_trips), color = "#26A699", size = 2) +
-  # Define scales and labels
-  scale_x_continuous(breaks = 0:23) +
-  scale_y_continuous(labels = comma) +
-  scale_fill_manual(values = service_period_colors) +
-  scale_color_manual(values = c("Weekday" = "#F2AE2E", 
-                                "Weekend" = "#A6123A")) +
-  labs(title = "Number of Trips by Hour with Service Periods",
-       x = "Hour of Day",
-       y = "Number of Trips",
-       fill = "Service Period",
-       color = "Day Type") +
-  theme_minimal() +
-  theme(legend.position = "bottom",
-        plot.title = element_text(hjust = 0.5))
+# # Plot the combined graph
+# ggplot() +
+#   # Add service period background rectangles
+#   geom_rect(data = service_periods, aes(xmin = start_hour, xmax = end_hour, ymin = 0, ymax = max(hourly_trips$number_of_trips), fill = peak_category), alpha = 0.3) +
+#   # Add the line plot for weekday trips
+#   geom_line(data = hourly_trips %>% filter(final_day_type == "Weekday"), aes(x = hour, y = number_of_trips), color = "#F2AE2E", size = 1) +
+#   geom_point(data = hourly_trips %>% filter(final_day_type == "Weekday"), aes(x = hour, y = number_of_trips), color = "#26A699", size = 2) +
+#   # Add the line plot for weekend trips
+#   geom_line(data = hourly_trips %>% filter(final_day_type == "Weekend"), aes(x = hour, y = number_of_trips), color = "#A6123A", size = 1) +
+#   geom_point(data = hourly_trips %>% filter(final_day_type == "Weekend"), aes(x = hour, y = number_of_trips), color = "#26A699", size = 2) +
+#   # Define scales and labels
+#   scale_x_continuous(breaks = 0:23) +
+#   scale_y_continuous(labels = comma) +
+#   scale_fill_manual(values = service_period_colors) +
+#   scale_color_manual(values = c("Weekday" = "#F2AE2E", 
+#                                 "Weekend" = "#A6123A")) +
+#   labs(title = "Number of Trips by Hour with Service Periods",
+#        x = "Hour of Day",
+#        y = "Number of Trips",
+#        fill = "Service Period",
+#        color = "Day Type") +
+#   theme_minimal() +
+#   theme(legend.position = "bottom",
+#         plot.title = element_text(hjust = 0.5))
   
 ```
 
-While bus services are integral to Philadelphia's transit system, not all areas benefit equally. Data specifically pertaining to suburban regions during weekday AM and PM peak hours reveals a stark disparity: most suburban bus stations face waiting times ranging from 30 to 60 minutes between buses. This significant wait time not only underscores the challenges faced by commuters like Midge but also highlights a broader issue affecting many suburban residents across Southeastern Pennsylvania, who rely heavily on bus transit.  
 
 ```{r set up stops category, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
 # SET UP STOPS CATEGORY. This step is crucial as we'll use stops information and join them for each kind of maps 
@@ -325,11 +368,47 @@ dat_trip_count_hr <- left_join(dat_trip_count_hr, stops, by = "stop_id")
 
 dat_trip_count_hr <- st_as_sf(dat_trip_count_hr, coords = c("stop_lon", "stop_lat"), crs = 4326, remove = FALSE)
 
+# Assuming 'county' is the column with the county information
+dat_trip_count_hr <- dat_trip_count_hr %>%
+  mutate(category = if_else(county == "PHILADELPHIA", "urban", "suburban"))
+
+# Simplify the max frequency into two categories
+dat_trip_count_hr <- dat_trip_count_hr %>%
+  mutate(simplified_freq = case_when(
+    max_freq %in% c("5 MAX", "10 MAX", "15 MAX") ~ "15 minutes or less",
+    TRUE ~ "More than 15 minutes"
+  ))
+
+# Remove rows where 'category' is NA
+dat_trip_count_hr <- dat_trip_count_hr %>% filter(!is.na(category))
+
 # sum(dat_trip_count_hr$trip_count) #1980505 <- Always make sure you retain the number of observation
 
 ```
 
-```{r service period stop data, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+```{r eval=FALSE, include=FALSE}
+ggplot(dat_trip_by_mode, aes(x = mode, y = mode_share, fill = mode)) +
+  geom_bar(stat = "identity", width = 0.75) +
+  scale_fill_manual(values = bus_revolution_palette(length(unique(dat_trip_by_mode$mode)))) +
+  geom_text(aes(label = paste0(mode_share, "% (", mode_count, " trips)")),
+            vjust = -0.5, color = "black", size = 2.5) +
+  labs(title = "Mode Share by Transit Type",
+       x = "Mode",
+       y = "Mode Share (%)",
+       fill = "Mode") +
+  theme_minimal() +
+  theme(legend.position = "right",
+        plot.title = element_text(hjust = 0.5))
+```
+
+
+### Unraveling the Disparities in Bus Service Efficiency
+
+The disparities in bus service efficiency between urban and suburban areas are starkly highlighted by frequency data. In suburban areas, the majority of bus stops suffer from infrequent services. This contrasts sharply with urban areas, where bus stops generally provide more frequent services. These differences underline significant inequities in transit accessibility, impacting daily commuters like Midge who rely heavily on these services.
+
+In the following leaflet map, we illustrate these disparities. You'll see that bus stops in suburban areas predominantly have longer waiting times, <span style="color: #655BA6;">exceeding 15 minutes</span>, whereas urban stops typically has waiting time <span style="color: #A6123A;">under 15 minutes</span>, demonstrating more frequent services. This visual representation emphasizes the urgent need for targeted improvements in suburban transit systems to bridge the gap and enhance overall service reliability and efficiency.
+
+```{r service period stop data, message=FALSE, warning=FALSE, cache=FALSE}
 # SET UP AVERAGE TRIP DATA PER SERVICE PERIOD FOR EACH BUS STOP
 
 dat_trip_count_prd <- dat %>%
@@ -354,11 +433,11 @@ dat_trip_count_prd <- left_join(dat_trip_count_prd, stops, by = "stop_id")
 dat_trip_count_prd <- st_as_sf(dat_trip_count_prd, coords = c("stop_lon", "stop_lat"), crs = 4326, remove = FALSE)
 
 # sum(dat_trip_count_prd$trip_count)  #1980505 <- Always make sure you retain the number of observation
+
+SEPTA_region_map <- st_transform(SEPTA_region_map, st_crs(dat_trip_count_hr))
 ```
 
-```{r average bus hourly maxfreq, message=FALSE, warning=FALSE, cache=FALSE}
-SEPTA_region_map <- st_transform(SEPTA_region_map, st_crs(dat_trip_count_hr))
-
+```{r average bus hourly maxfreq, eval=FALSE, message=FALSE, warning=FALSE, cache=FALSE, include=FALSE}
 # # Define color palette
 # pal <- colorNumeric(palette = viridisLite::viridis(256, option = "C"), domain = dat_trip_count_hr$avg_trip_hr)
 
@@ -377,110 +456,76 @@ pal_max_freq <- colorFactor(palette = max_freq_colors, domain = dat_trip_count_h
 #   mutate(group_name = paste(final_day_type, peak_category, sep = "_")) %>%
 #   pull(group_name)
 
+# # Create the leaflet map
+# m_avg_trip_hr <- leaflet() %>%
+#   addProviderTiles(providers$CartoDB.Positron) %>%
+#   addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
+#   addCircleMarkers(data = dat_trip_count_hr %>% filter(final_day_type == "Weekday"),
+#                    group = "Weekday",
+#                    lng = ~stop_lon, lat = ~stop_lat,
+#                    color = ~pal_max_freq(max_freq),
+#                    radius = 1,
+#                    opacity = 0.8,
+#                    popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+#                                    "<b>Stop Name:</b> ", stop_name, "<br>",
+#                                    "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+#                                    "<b>Max Frequency:</b> ", max_freq, "<br>",
+#                                    "<b>All Routes:</b> ", All_Routes, "<br>",
+#                                    "<b>Day Type:</b> ", final_day_type)) %>%
+#   addCircleMarkers(data = dat_trip_count_hr %>% filter(final_day_type == "Weekend"),
+#                    group = "Weekend",
+#                    lng = ~stop_lon, lat = ~stop_lat,
+#                    color = ~pal_max_freq(max_freq),
+#                    radius = 1,
+#                    opacity = 0.8,
+#                    popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+#                                    "<b>Stop Name:</b> ", stop_name, "<br>",
+#                                    "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+#                                    "<b>Max Frequency:</b> ", max_freq, "<br>",
+#                                    "<b>All Routes:</b> ", All_Routes, "<br>",
+#                                    "<b>Day Type:</b> ", final_day_type)) %>%
+#   addLayersControl(
+#     overlayGroups = c("Weekday", "Weekend"),
+#     options = layersControlOptions(collapsed = FALSE)
+#   ) %>%
+#   hideGroup(c("Weekend")) %>%
+#   addLegend(pal = pal_max_freq, values = dat_trip_count_hr$max_freq, title = "Max Frequency",
+#             position = "bottomright")
+# 
+# m_avg_trip_hr
+```
+
+```{r average bus hourly simplified, message=FALSE, warning=FALSE, cache=FALSE}
+# Define color palette for simplified frequency using the bus revolution colors
+pal <- colorFactor(c("#A6123A", "#655BA6"), domain = c("15 minutes or less", "More than 15 minutes"))
+
 # Create the leaflet map
 m_avg_trip_hr <- leaflet() %>%
   addProviderTiles(providers$CartoDB.Positron) %>%
   addPolygons(data = SEPTA_region_map, color = "black", weight = 1, fill = FALSE) %>%
-  addCircleMarkers(data = dat_trip_count_hr %>% filter(final_day_type == "Weekday"),
-                   group = "Weekday",
-                   lng = ~stop_lon, lat = ~stop_lat,
-                   color = ~pal_max_freq(max_freq),
-                   radius = 1,
-                   opacity = 0.8,
-                   popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
-                                   "<b>Stop Name:</b> ", stop_name, "<br>",
-                                   "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
-                                   "<b>Max Frequency:</b> ", max_freq, "<br>",
-                                   "<b>All Routes:</b> ", All_Routes, "<br>",
-                                   "<b>Day Type:</b> ", final_day_type)) %>%
-  addCircleMarkers(data = dat_trip_count_hr %>% filter(final_day_type == "Weekend"),
-                   group = "Weekend",
-                   lng = ~stop_lon, lat = ~stop_lat,
-                   color = ~pal_max_freq(max_freq),
-                   radius = 1,
-                   opacity = 0.8,
-                   popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
-                                   "<b>Stop Name:</b> ", stop_name, "<br>",
-                                   "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
-                                   "<b>Max Frequency:</b> ", max_freq, "<br>",
-                                   "<b>All Routes:</b> ", All_Routes, "<br>",
-                                   "<b>Day Type:</b> ", final_day_type)) %>%
+  addCircleMarkers(
+    data = dat_trip_count_hr %>% filter(final_day_type == "Weekday" & !is.na(category)),
+    group = ~category,  # Group data based on urban or suburban
+    lng = ~stop_lon, 
+    lat = ~stop_lat,
+    color = ~pal(simplified_freq),  # Color based on simplified frequency
+    radius = 1,
+    opacity = 0.8,
+    popup = ~paste0("<b>Stop ID:</b> ", stop_id, "<br>",
+                    "<b>Stop Name:</b> ", stop_name, "<br>",
+                    "<b>Avg Buses/Hr:</b> ", avg_trip_hr, "<br>",
+                    "<b>Max Frequency:</b> ", simplified_freq, "<br>",
+                    "<b>All Routes:</b> ", All_Routes)
+  ) %>%
   addLayersControl(
-    overlayGroups = c("Weekday", "Weekend"),
+    overlayGroups = c("urban", "suburban"),
     options = layersControlOptions(collapsed = FALSE)
   ) %>%
-  hideGroup(c("Weekend")) %>%
-  addLegend(pal = pal_max_freq, values = dat_trip_count_hr$max_freq, title = "Max Frequency",
-            position = "bottomright")
+  addControl(html = "<div style='background-color: white; padding: 5px;'><strong>Source:</strong> SEPTA GTFS Data 2024</div>", position = "bottomleft")
 
+# Display the map
 m_avg_trip_hr
-```
-
-Further analysis of bus stop data by county—excluding Philadelphia's Center City—reveals a misleading equality in service distribution across the counties. While the top bus stops in each county boast a 5-minute maximum headway, reflecting seemingly equal service levels, the actual number of buses tells a different story. For instance, even at their busiest, bus stops in Bucks County see an average of only 15 buses per hour at the 5 MAX category, starkly less than the 30 buses seen in similar categories in Philadelphia’s outlying areas. This discrepancy highlights the concentration of better services still within closer proximity to urban centers, despite attempts at equitable distribution.
-
-```{r top 10 stops table, message=FALSE, warning=FALSE, cache=TRUE}
-# Filter and select the top 10 stops for 'mode' == 'bus' on the weekday
-top_stops_hr_weekday <- dat_trip_count_hr %>%
-  filter(mode %in% c("Bus","Trolleybus"), final_day_type == "Weekday") %>%
-  select(stop_id, stop_name, avg_trip_hr, All_Routes) %>%
-  arrange(desc(avg_trip_hr)) %>%
-  slice_head(n = 10)
-
-# Create a table with kable and enhance it with kableExtra
-kable(top_stops_hr_weekday, "html", booktabs = TRUE, 
-      caption = "Top 10 Bus Stops by Average Trips Per Hour on the Weekday",
-      align = c('l', rep('l', ncol(top_stops_hr_weekday) - 1))) %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
-  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
-  column_spec(3, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;")
 
 ```
 
-
-```{r top 5 stops table, message=FALSE, warning=FALSE, cache=TRUE}
-# Define a custom palette for the categories
-category_colors <- c(
-  "BUCKS" = "#A9D08E",
-  "CHESTER" = "#FFD966",
-  "DELAWARE" = "#F4B084",
-  "MONTGOMERY" = "#D5A6BD",
-  "PHILADELPHIA-Not_Center_City" = "#A4C2F4"
-)
-
-# Example with Weekday data
-dat_filtered_weekday <- dat_trip_count_hr %>%
-  filter(mode %in% c("Bus","Trolleybus"), final_day_type == "Weekday" & category != "PHILADELPHIA-Center_City")
-
-# Function to get top 5 stops per category
-get_top_stops_per_category <- function(data, n = 5) {
-  data %>%
-    group_by(category) %>%
-    select(stop_id, stop_name, avg_trip_hr, max_freq, All_Routes, category) %>%
-    arrange(desc(avg_trip_hr)) %>%
-    slice_head(n = n) %>%
-    ungroup()
-}
-
-# Get top 5 stops per category for Weekday
-top_stops_hr_weekday <- get_top_stops_per_category(dat_filtered_weekday, n = 5)
-
-# Create the table for Weekday with row colors
-kable(top_stops_hr_weekday, "html", booktabs = TRUE, 
-      caption = "Top 5 Bus Stops by Average Trips Per Hour on the Weekday",
-      align = c('l', rep('l', ncol(top_stops_hr_weekday) - 1))) %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
-  column_spec(1, bold = TRUE, color = "#655BA6", width = "5em") %>%
-  column_spec(3, bold = TRUE, color = "#A6123A", extra_css = "text-align: right;") 
-```
-
-### Impact and Innovation: Enhancing Suburban Bus Services
-
-While the raw data illuminates the service disparities, the true depth of this issue is best captured through the lived experiences of suburban commuters like Midge. Personal stories reveal the broader human impact: missed opportunities, prolonged workdays, and diminished family life due to infrequent bus services. This qualitative insight paints a vivid picture of the daily challenges and underscores the urgency for targeted improvements.
-
-SEPTA's ongoing "Bus Revolution" project aims to modernize and enhance bus services, promising updated routes and improved frequencies that haven't been revised since the 1960s. While the initiative seeks to reduce headways to a maximum of 30 minutes even in the most remote suburban areas, it has faced delays and criticism, particularly concerning its potential to disproportionately impact low-income neighborhoods. This tension highlights the complex interplay between improving service efficiency and addressing community concerns of gentrification.
-
-As we conclude our exploration of suburban bus transit disparities in Philadelphia, the compelling narratives of daily commuters, underpinned by robust SEPTA data, paint a clear picture of the challenges and the urgent need for systemic improvements. The "Bus Revolution" project, while a promising step toward enhancing bus frequencies and updating decades-old routes, also highlights the delicate balance required to improve service efficiency without exacerbating social inequities.
-
-Embracing innovative solutions and fostering community engagement in transit planning are crucial. By committing to both technological upgrades and equitable service distribution, SEPTA can ensure that every commuter, regardless of where they live, has reliable and timely access to public transit. This not only improves individual daily experiences but also supports broader goals of economic mobility and sustainable urban development.
-
-As stakeholders, we are called upon to support these initiatives, advocate for transparent and inclusive planning processes, and ensure that the voices of all commuters, especially those most affected like Midge, are heard and addressed in the pursuit of a truly connected and equitable transit system.
+Midge’s daily challenge with inconsistent suburban bus service reflects broader transit inequities between urban and suburban settings. This disparity is exemplified by the operational inefficiencies of suburban routes, highlighted by data indicating these buses frequently fall within the lowest 15th percentile for service performance. This low percentile indicates prolonged wait times and unreliable schedules—factors contributing to higher operational costs and reduced reliability compared to more efficient urban 
